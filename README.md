@@ -54,12 +54,12 @@ CnR currently supports programming logic structures:
 
 CnR currently supports:
 
-NOTHING
-
-Future improvements:
 - Function declaration
 - Function execution
 - Return values
+- Structs
+
+Future improvements:
 - More advanced function systems
 - Better function composition
 - Additional language abstractions

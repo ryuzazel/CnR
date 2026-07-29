@@ -1,79 +1,129 @@
+Struct LinearRegression {
+
+    var w1;
+    var w2;
+    var w3;
+    var b;
+
+
+    LinearRegression(var a, var c, var d, var bias) {
+
+        w1 = a;
+        w2 = c;
+        w3 = d;
+        b = bias;
+
+    }
+
+}
+
+
+
+function train(var model, var x1, var x2, var x3, var y, var epochs, var lr)
+{
+
+    var epoch = 0;
+
+
+    while(epoch < epochs)
+    {
+
+        var dw1 = 0;
+        var dw2 = 0;
+        var dw3 = 0;
+        var db = 0;
+
+
+        var i = 0;
+
+
+        while(i < len(x1))
+        {
+
+            var pred = 0;
+
+
+            pred = pred + model.w1 * x1[i];
+            pred = pred + model.w2 * x2[i];
+            pred = pred + model.w3 * x3[i];
+            pred = pred + model.b;
+
+
+            var err = pred - y[i];
+
+
+            dw1 = dw1 + err * x1[i];
+            dw2 = dw2 + err * x2[i];
+            dw3 = dw3 + err * x3[i];
+
+            db = db + err;
+
+
+            i = i + 1;
+
+        }
+
+
+        var n = len(x1);
+
+
+        model.w1 = model.w1 - lr * (dw1 / n);
+        model.w2 = model.w2 - lr * (dw2 / n);
+        model.w3 = model.w3 - lr * (dw3 / n);
+
+        model.b = model.b - lr * (db / n);
+
+
+        lr = lr * 0.99995;
+
+
+        epoch = epoch + 1;
+
+    }
+
+
+}
+
+
+
 var x1[] = {
 1,0,0,0,1,0,0,2,0,0
 };
+
 
 var x2[] = {
 0,1,0,0,1,0,0,0,2,0
 };
 
+
 var x3[] = {
 0,0,1,0,0,1,0,0,0,2
 };
 
+
 var y[] = {
-11,   
-3,  
-6,    
-1,   
-13,  
-6,    
-1,   
-21,  
-5,   
-11    
+11,
+3,
+6,
+1,
+13,
+6,
+1,
+21,
+5,
+11
 };
 
-var w1 = 0;
-var w2 = 0;
-var w3 = 0;
-var b = 0;
 
-var lr = 0.01;
 
-var epoch = 0;
+var model = LinearRegression(0,0,0,0);
 
-while(epoch < 20000)
-{
-    var dw1 = 0;
-    var dw2 = 0;
-    var dw3 = 0;
-    var db = 0;
 
-    var i = 0;
+train(model, x1, x2, x3, y, 20000, 0.01);
 
-    while(i < len(x1))
-    {
-        var pred = 0;
 
-        pred = pred + w1 * x1[i];
-        pred = pred + w2 * x2[i];
-        pred = pred + w3 * x3[i];
-        pred = pred + b;
 
-        var err = pred - y[i];
-
-        dw1 = dw1 + err * x1[i];
-        dw2 = dw2 + err * x2[i];
-        dw3 = dw3 + err * x3[i];
-
-        db = db + err;
-
-        i = i + 1;
-    }
-
-    var n = len(x1);
-
-    w1 = w1 - lr * (dw1 / n);
-    w2 = w2 - lr * (dw2 / n);
-    w3 = w3 - lr * (dw3 / n);
-    b  = b  - lr * (db / n);
-
-    lr = lr * 0.99995;
-
-    epoch = epoch + 1;
-}
-
-print(w1);
-print(w2);
-print(w3);
-print(b);
+print(model.w1);
+print(model.w2);
+print(model.w3);
+print(model.b);

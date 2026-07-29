@@ -11,11 +11,12 @@
 enum class TokType {
     Number, Ident,
     Var, Print, If, Else, While, For, TrueKw, FalseKw, CharKw, LenKw,
+    Function, Return, StructKw,
     Plus, Minus, Star, Slash, Percent,
     Assign,
     EqualEqual, BangEqual, Less, LessEqual, Greater, GreaterEqual,
     AndAnd, OrOr, Bang,
-    Semicolon, Comma,
+    Semicolon, Comma, Dot,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     End
 };
@@ -71,6 +72,9 @@ struct Lexer {
         if (s == "false") return {TokType::FalseKw,s,0,startLine};
         if (s == "char") return {TokType::CharKw,s,0,startLine};
         if (s == "len") return {TokType::LenKw,s,0,startLine};
+        if (s == "function") return {TokType::Function,s,0,startLine};
+        if (s == "return") return {TokType::Return,s,0,startLine};
+        if (s == "Struct") return {TokType::StructKw,s,0,startLine};
         return {TokType::Ident,s,0,startLine};
     }
     Token number() {
@@ -100,6 +104,7 @@ struct Lexer {
             case '%': out.push_back({TokType::Percent,"%",0,l}); break;
             case ';': out.push_back({TokType::Semicolon,";",0,l}); break;
             case ',': out.push_back({TokType::Comma,",",0,l}); break;
+            case '.': out.push_back({TokType::Dot,".",0,l}); break;
             case '(': out.push_back({TokType::LParen,"(",0,l}); break;
             case ')': out.push_back({TokType::RParen,")",0,l}); break;
             case '{': out.push_back({TokType::LBrace,"{",0,l}); break;
@@ -152,15 +157,45 @@ struct BinaryExpr : Expr { TokType op; ExprPtr left; ExprPtr right; BinaryExpr(T
 struct CharCastExpr : Expr { ExprPtr expr; CharCastExpr(ExprPtr e):expr(std::move(e)){} };
 struct LenExpr : Expr { std::string arrayName; LenExpr(std::string n):arrayName(std::move(n)){} };
 struct ArrayAccessExpr : Expr { std::string arrayName; ExprPtr index; ArrayAccessExpr(std::string n, ExprPtr i):arrayName(std::move(n)),index(std::move(i)){} };
+struct CallExpr : Expr { std::string name; std::vector<ExprPtr> args; };
+struct MemberAccessExpr : Expr { std::string objectName; std::string member; ExprPtr index; };
 
 struct VarDeclStmt : Stmt { bool isArray = false; std::string name; ExprPtr value; std::vector<ExprPtr> arrayValues; };
 struct AssignStmt : Stmt { std::string name; ExprPtr value; };
 struct ArrayAssignStmt : Stmt { std::string arrayName; ExprPtr index; ExprPtr value; };
+struct MemberAssignStmt : Stmt { std::string objectName; std::string member; ExprPtr index; ExprPtr value; };
 struct PrintStmt : Stmt { bool printChar=false; bool printCharArray=false; ExprPtr expr; std::string arrayName; };
 struct BlockStmt : Stmt { std::vector<StmtPtr> statements; };
 struct IfStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> thenBlock; std::shared_ptr<BlockStmt> elseBlock; };
 struct WhileStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> body; };
 struct ForStmt : Stmt { StmtPtr init; ExprPtr condition; StmtPtr increment; std::shared_ptr<BlockStmt> body; };
+struct ReturnStmt : Stmt { ExprPtr value; };
+struct ExprStmt : Stmt { ExprPtr expr; };
+
+// --- Function & struct declarations (top-level metadata, not executed statements) ---
+struct FunctionDecl {
+    std::string name;
+    std::vector<std::string> params;
+    std::shared_ptr<BlockStmt> body;
+};
+
+struct StructField {
+    std::string name;
+    bool isArray = false;
+};
+
+struct StructDecl {
+    std::string name;
+    std::vector<StructField> fields;
+    std::vector<std::string> ctorParams;
+    std::shared_ptr<BlockStmt> ctorBody;
+};
+
+struct Program {
+    std::vector<StmtPtr> statements;
+    std::unordered_map<std::string, FunctionDecl> functions;
+    std::unordered_map<std::string, StructDecl> structs;
+};
 
 struct Parser {
     std::vector<Token> tokens;
@@ -241,6 +276,10 @@ struct Parser {
     ExprPtr parseUnary() {
         if(match(TokType::Minus)) return std::make_shared<UnaryExpr>(TokType::Minus, parseUnary());
         if(match(TokType::Bang)) return std::make_shared<UnaryExpr>(TokType::Bang, parseUnary());
+        return parseCall();
+    }
+    ExprPtr parseCall() {
+        // handles primary + optional call/member/index suffixes
         return parsePrimary();
     }
     ExprPtr parsePrimary() {
@@ -272,10 +311,33 @@ struct Parser {
         }
         if(check(TokType::Ident)) {
             std::string name = advance().text;
+            if(match(TokType::LParen)) {
+                auto call = std::make_shared<CallExpr>();
+                call->name = name;
+                if(!check(TokType::RParen)) {
+                    while(true) {
+                        call->args.push_back(parseExpression());
+                        if(match(TokType::Comma)) continue;
+                        break;
+                    }
+                }
+                expect(TokType::RParen,")");
+                return call;
+            }
             if(match(TokType::LBracket)) {
                 auto idx = parseExpression();
                 expect(TokType::RBracket,"]");
                 return std::make_shared<ArrayAccessExpr>(name, idx);
+            }
+            if(match(TokType::Dot)) {
+                auto m = std::make_shared<MemberAccessExpr>();
+                m->objectName = name;
+                m->member = expect(TokType::Ident,"member name").text;
+                if(match(TokType::LBracket)) {
+                    m->index = parseExpression();
+                    expect(TokType::RBracket,"]");
+                }
+                return m;
             }
             return std::make_shared<VarExpr>(name);
         }
@@ -350,6 +412,36 @@ struct Parser {
 
     StmtPtr parseAssignmentStatement(bool consumeSemicolon = true) {
         auto id= expect(TokType::Ident,"identifier");
+        if(check(TokType::LParen)) {
+            advance();
+            auto call = std::make_shared<CallExpr>();
+            call->name = id.text;
+            if(!check(TokType::RParen)) {
+                while(true) {
+                    call->args.push_back(parseExpression());
+                    if(match(TokType::Comma)) continue;
+                    break;
+                }
+            }
+            expect(TokType::RParen,")");
+            if(consumeSemicolon) expect(TokType::Semicolon,";");
+            auto stmt = std::make_shared<ExprStmt>();
+            stmt->expr = call;
+            return stmt;
+        }
+        if(match(TokType::Dot)) {
+            auto stmt = std::make_shared<MemberAssignStmt>();
+            stmt->objectName = id.text;
+            stmt->member = expect(TokType::Ident,"member name").text;
+            if(match(TokType::LBracket)) {
+                stmt->index = parseExpression();
+                expect(TokType::RBracket,"]");
+            }
+            expect(TokType::Assign,"=");
+            stmt->value=parseExpression();
+            if(consumeSemicolon) expect(TokType::Semicolon,";");
+            return stmt;
+        }
         if(match(TokType::LBracket)) {
             auto stmt= std::make_shared<ArrayAssignStmt>();
             stmt->arrayName=id.text;
@@ -403,19 +495,99 @@ struct Parser {
         return stmt;
     }
 
+    StmtPtr parseReturn() {
+        expect(TokType::Return,"return");
+        auto stmt = std::make_shared<ReturnStmt>();
+        if(!check(TokType::Semicolon)) stmt->value = parseExpression();
+        expect(TokType::Semicolon,";");
+        return stmt;
+    }
+
     StmtPtr parseStatement() {
         if(check(TokType::Var)) return parseVarDecl();
         if(check(TokType::Print)) return parsePrint();
         if(check(TokType::If)) return parseIf();
         if(check(TokType::While)) return parseWhile();
         if(check(TokType::For)) return parseFor();
+        if(check(TokType::Return)) return parseReturn();
         if(check(TokType::Ident)) return parseAssignmentStatement();
         throw std::runtime_error("Unexpected statement on line " + std::to_string(peek().line));
     }
 
-    std::vector<StmtPtr> parseProgram() {
-        std::vector<StmtPtr> prog;
-        while(!check(TokType::End)) prog.push_back(parseStatement());
+    FunctionDecl parseFunctionDecl() {
+        expect(TokType::Function,"function");
+        FunctionDecl fn;
+        fn.name = expect(TokType::Ident,"function name").text;
+        expect(TokType::LParen,"(");
+        if(!check(TokType::RParen)) {
+            while(true) {
+                expect(TokType::Var,"'var' before parameter name");
+                fn.params.push_back(expect(TokType::Ident,"parameter name").text);
+                if(match(TokType::Comma)) continue;
+                break;
+            }
+        }
+        expect(TokType::RParen,")");
+        fn.body = parseBlock();
+        return fn;
+    }
+
+    StructDecl parseStructDecl() {
+        expect(TokType::StructKw,"Struct");
+        StructDecl sd;
+        sd.name = expect(TokType::Ident,"struct name").text;
+        expect(TokType::LBrace,"{");
+        bool ctorFound = false;
+        while(!check(TokType::RBrace)) {
+            if(check(TokType::End))
+                throw std::runtime_error("Unexpected end of file inside struct '" + sd.name + "'");
+            if(check(TokType::Var)) {
+                advance();
+                std::string fname = expect(TokType::Ident,"field name").text;
+                bool isArr = false;
+                if(match(TokType::LBracket)) { expect(TokType::RBracket,"]"); isArr = true; }
+                expect(TokType::Semicolon,";");
+                sd.fields.push_back({fname, isArr});
+                continue;
+            }
+            if(check(TokType::Ident) && peek().text == sd.name) {
+                advance();
+                expect(TokType::LParen,"(");
+                if(!check(TokType::RParen)) {
+                    while(true) {
+                        expect(TokType::Var,"'var' before parameter name");
+                        sd.ctorParams.push_back(expect(TokType::Ident,"parameter name").text);
+                        if(match(TokType::Comma)) continue;
+                        break;
+                    }
+                }
+                expect(TokType::RParen,")");
+                sd.ctorBody = parseBlock();
+                ctorFound = true;
+                continue;
+            }
+            throw std::runtime_error("Unexpected token in struct '" + sd.name + "' on line " + std::to_string(peek().line));
+        }
+        expect(TokType::RBrace,"}");
+        if(!ctorFound) sd.ctorBody = std::make_shared<BlockStmt>();
+        return sd;
+    }
+
+    Program parseProgram() {
+        Program prog;
+        while(!check(TokType::End)) {
+            if(check(TokType::Function)) {
+                auto fn = parseFunctionDecl();
+                prog.functions[fn.name] = fn;
+                continue;
+            }
+            if(check(TokType::StructKw)) {
+                auto sd = parseStructDecl();
+                prog.structs[sd.name] = sd;
+                continue;
+            }
+            prog.statements.push_back(parseStatement());
+        }
         return prog;
     }
 };
@@ -423,19 +595,46 @@ struct Parser {
 struct Value {
     bool isArray = false;
     bool isBool = false;
+    bool isStruct = false;
     double number = 0;
-    std::vector<double> array;
     bool boolean = false;
+    std::vector<double> array;
+    std::string structType;
+    std::shared_ptr<std::unordered_map<std::string, Value>> fields;
 };
+
+// Thrown by 'return' statements; carries the returned value up to the call site.
+struct ReturnSignal { Value value; };
 
 class Interpreter {
 public:
-    std::unordered_map<std::string, Value> vars;
+    Interpreter(std::unordered_map<std::string, FunctionDecl> fns,
+                std::unordered_map<std::string, StructDecl> strs)
+        : functions(std::move(fns)), structs(std::move(strs)) {
+        scopes.push_back({});
+    }
+
+    std::vector<std::unordered_map<std::string, Value>> scopes;
+    std::unordered_map<std::string, FunctionDecl> functions;
+    std::unordered_map<std::string, StructDecl> structs;
+    Value* currentSelf = nullptr; // non-null while executing a struct constructor
+
 Value& lookupVar(const std::string& name) {
-    auto it = vars.find(name);
-    if(it == vars.end())
-        throw std::runtime_error("Undefined variable '" + name + "'");
-    return it->second;
+    for(auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+        auto found = it->find(name);
+        if(found != it->end()) return found->second;
+    }
+    throw std::runtime_error("Undefined variable '" + name + "'");
+}
+
+// Resolves a bare name: inside a constructor, struct fields take priority
+// over outer scopes so 'id = 5;' targets the instance being built.
+Value& resolveVar(const std::string& name) {
+    if(currentSelf) {
+        auto it = currentSelf->fields->find(name);
+        if(it != currentSelf->fields->end()) return it->second;
+    }
+    return lookupVar(name);
 }
 
 double evalNumber(const ExprPtr& expr)
@@ -445,9 +644,11 @@ double evalNumber(const ExprPtr& expr)
     if(auto bo = std::dynamic_pointer_cast<BoolExpr>(expr)) return bo->value ? 1.0 : 0.0;
 
     if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
-        Value& val = lookupVar(v->name);
+        Value& val = resolveVar(v->name);
         if(val.isArray)
             throw std::runtime_error("Cannot use array '" + v->name + "' as a number");
+        if(val.isStruct)
+            throw std::runtime_error("Cannot use struct '" + v->name + "' as a number");
         if(val.isBool) return val.boolean ? 1.0 : 0.0;
         return val.number;
     }
@@ -493,7 +694,7 @@ double evalNumber(const ExprPtr& expr)
     if(auto a = std::dynamic_pointer_cast<ArrayAccessExpr>(expr)) {
         if(!a->index)
             throw std::runtime_error("Array '" + a->arrayName + "' used without an index in this context");
-        Value& val = lookupVar(a->arrayName);
+        Value& val = resolveVar(a->arrayName);
         if(!val.isArray)
             throw std::runtime_error("'" + a->arrayName + "' is not an array");
         int index = (int)evalNumber(a->index);
@@ -503,10 +704,24 @@ double evalNumber(const ExprPtr& expr)
     }
 
     if(auto l = std::dynamic_pointer_cast<LenExpr>(expr)) {
-        Value& val = lookupVar(l->arrayName);
+        Value& val = resolveVar(l->arrayName);
         if(!val.isArray)
             throw std::runtime_error("'" + l->arrayName + "' is not an array");
         return (double)val.array.size();
+    }
+
+    if(auto m = std::dynamic_pointer_cast<MemberAccessExpr>(expr)) {
+        Value v = evalMemberAccess(m);
+        if(v.isArray) throw std::runtime_error("Cannot use array field '" + m->member + "' as a number");
+        if(v.isStruct) throw std::runtime_error("Cannot use struct field '" + m->member + "' as a number");
+        return v.isBool ? (v.boolean ? 1.0 : 0.0) : v.number;
+    }
+
+    if(auto c = std::dynamic_pointer_cast<CallExpr>(expr)) {
+        Value v = callCallable(c->name, c->args);
+        if(v.isArray) throw std::runtime_error("Cannot use array result of '" + c->name + "' as a number");
+        if(v.isStruct) throw std::runtime_error("Cannot use struct result of '" + c->name + "' as a number");
+        return v.isBool ? (v.boolean ? 1.0 : 0.0) : v.number;
     }
 
     throw std::runtime_error("Cannot evaluate numeric expression.");
@@ -520,7 +735,7 @@ bool evalBool(const ExprPtr& expr)
     }
 
     if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
-        Value& val = lookupVar(v->name);
+        Value& val = resolveVar(v->name);
         if(val.isBool) return val.boolean;
         return val.number != 0;
     }
@@ -553,6 +768,113 @@ bool evalBool(const ExprPtr& expr)
 
     return evalNumber(expr)!=0;
 }
+
+// General expression evaluator: returns a full Value (used where the result
+// might be a struct instance or the outcome of a function call).
+Value evalToValue(const ExprPtr& expr) {
+    if(auto c = std::dynamic_pointer_cast<CallExpr>(expr)) return callCallable(c->name, c->args);
+    if(auto m = std::dynamic_pointer_cast<MemberAccessExpr>(expr)) return evalMemberAccess(m);
+    if(auto b = std::dynamic_pointer_cast<BoolExpr>(expr)) { Value v; v.isBool=true; v.boolean=b->value; return v; }
+    if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+        Value& val = resolveVar(v->name);
+        return val; // copy (arrays/struct fields copied by value, consistent with rest of language)
+    }
+    Value v; v.number = evalNumber(expr); return v;
+}
+
+Value evalMemberAccess(const std::shared_ptr<MemberAccessExpr>& m) {
+    Value& obj = resolveVar(m->objectName);
+    if(!obj.isStruct)
+        throw std::runtime_error("'" + m->objectName + "' is not a struct instance");
+    auto it = obj.fields->find(m->member);
+    if(it == obj.fields->end())
+        throw std::runtime_error("Struct '" + obj.structType + "' has no field '" + m->member + "'");
+    Value& field = it->second;
+    if(m->index) {
+        if(!field.isArray)
+            throw std::runtime_error("Field '" + m->member + "' is not an array");
+        int idx = (int)evalNumber(m->index);
+        if(idx < 0 || idx >= (int)field.array.size())
+            throw std::runtime_error("Array index out of bounds for field '" + m->member + "': " + std::to_string(idx));
+        Value r; r.number = field.array[idx];
+        return r;
+    }
+    return field;
+}
+
+Value callCallable(const std::string& name, const std::vector<ExprPtr>& argExprs) {
+    std::vector<Value> argVals;
+    argVals.reserve(argExprs.size());
+    for(auto& a : argExprs) argVals.push_back(evalToValue(a));
+
+    auto sIt = structs.find(name);
+    if(sIt != structs.end()) return instantiateStruct(sIt->second, argVals);
+
+    auto fIt = functions.find(name);
+    if(fIt != functions.end()) return callFunction(fIt->second, argVals);
+
+    throw std::runtime_error("Undefined function or struct '" + name + "'");
+}
+
+Value callFunction(const FunctionDecl& fn, std::vector<Value>& args) {
+    if(args.size() != fn.params.size())
+        throw std::runtime_error("Function '" + fn.name + "' expects " + std::to_string(fn.params.size()) +
+                                  " argument(s), got " + std::to_string(args.size()));
+    scopes.push_back({});
+    for(size_t i=0;i<fn.params.size();++i) scopes.back()[fn.params[i]] = args[i];
+
+    Value* prevSelf = currentSelf;
+    currentSelf = nullptr; // a function body is not "inside" a struct instance
+    Value result; // default: number 0, used when the function is void
+    try {
+        executeBlock(fn.body);
+    } catch(ReturnSignal& r) {
+        result = r.value;
+        scopes.pop_back();
+        currentSelf = prevSelf;
+        return result;
+    } catch(...) {
+        scopes.pop_back();
+        currentSelf = prevSelf;
+        throw;
+    }
+    scopes.pop_back();
+    currentSelf = prevSelf;
+    return result;
+}
+
+Value instantiateStruct(const StructDecl& sd, std::vector<Value>& args) {
+    if(args.size() != sd.ctorParams.size())
+        throw std::runtime_error("Struct '" + sd.name + "' constructor expects " + std::to_string(sd.ctorParams.size()) +
+                                  " argument(s), got " + std::to_string(args.size()));
+    Value instance;
+    instance.isStruct = true;
+    instance.structType = sd.name;
+    instance.fields = std::make_shared<std::unordered_map<std::string, Value>>();
+    for(auto& f : sd.fields) {
+        Value fv;
+        fv.isArray = f.isArray;
+        (*instance.fields)[f.name] = fv;
+    }
+
+    scopes.push_back({});
+    for(size_t i=0;i<sd.ctorParams.size();++i) scopes.back()[sd.ctorParams[i]] = args[i];
+    Value* prevSelf = currentSelf;
+    currentSelf = &instance;
+    try {
+        executeBlock(sd.ctorBody);
+    } catch(ReturnSignal&) {
+        // 'return;' with no value simply ends the constructor early; ignore.
+    } catch(...) {
+        scopes.pop_back();
+        currentSelf = prevSelf;
+        throw;
+    }
+    scopes.pop_back();
+    currentSelf = prevSelf;
+    return instance;
+}
+
 void executeBlock(const std::shared_ptr<BlockStmt>& block) {
     for(auto& stmt : block->statements) execute(stmt);
 }
@@ -563,30 +885,22 @@ void execute(const StmtPtr& stmt)
         value.isArray = s->isArray;
         if(s->isArray) {
             for(auto& e : s->arrayValues) value.array.push_back(evalNumber(e));
-        } else if(auto boolLit = std::dynamic_pointer_cast<BoolExpr>(s->value)) {
-            value.isBool = true;
-            value.boolean = boolLit->value;
         } else {
-            value.number = evalNumber(s->value);
+            value = evalToValue(s->value);
         }
-        vars[s->name]=value;
+        scopes.back()[s->name]=value;
         return;
     }
     if(auto s = std::dynamic_pointer_cast<AssignStmt>(stmt)) {
-        Value& val = lookupVar(s->name);
+        Value& val = resolveVar(s->name);
         if(val.isArray)
             throw std::runtime_error("Cannot assign a number to array '" + s->name + "'");
-        if(auto boolLit = std::dynamic_pointer_cast<BoolExpr>(s->value)) {
-            val.isBool = true;
-            val.boolean = boolLit->value;
-        } else {
-            val.isBool = false;
-            val.number = evalNumber(s->value);
-        }
+        Value newVal = evalToValue(s->value);
+        val = newVal;
         return;
     }
     if(auto s = std::dynamic_pointer_cast<ArrayAssignStmt>(stmt)) {
-        Value& val = lookupVar(s->arrayName);
+        Value& val = resolveVar(s->arrayName);
         if(!val.isArray)
             throw std::runtime_error("'" + s->arrayName + "' is not an array");
         int index = (int)evalNumber(s->index);
@@ -595,9 +909,32 @@ void execute(const StmtPtr& stmt)
         val.array[index] = evalNumber(s->value);
         return;
     }
+    if(auto s = std::dynamic_pointer_cast<MemberAssignStmt>(stmt)) {
+        Value& obj = resolveVar(s->objectName);
+        if(!obj.isStruct)
+            throw std::runtime_error("'" + s->objectName + "' is not a struct instance");
+        auto it = obj.fields->find(s->member);
+        if(it == obj.fields->end())
+            throw std::runtime_error("Struct '" + obj.structType + "' has no field '" + s->member + "'");
+        Value& field = it->second;
+        if(s->index) {
+            if(!field.isArray)
+                throw std::runtime_error("Field '" + s->member + "' is not an array");
+            int idx = (int)evalNumber(s->index);
+            if(idx < 0 || idx >= (int)field.array.size())
+                throw std::runtime_error("Array index out of bounds for field '" + s->member + "': " + std::to_string(idx));
+            field.array[idx] = evalNumber(s->value);
+        } else {
+            if(field.isArray)
+                throw std::runtime_error("Cannot assign a number to array field '" + s->member + "'");
+            Value newVal = evalToValue(s->value);
+            field = newVal;
+        }
+        return;
+    }
     if(auto s = std::dynamic_pointer_cast<PrintStmt>(stmt)) {
         if(s->printCharArray) {
-            auto& arr = vars[s->arrayName].array;
+            auto& arr = resolveVar(s->arrayName).array;
             for(double c : arr) std::cout << (char)c;
             std::cout << '\n';
             return;
@@ -620,14 +957,27 @@ void execute(const StmtPtr& stmt)
         while(evalBool(s->condition)) { executeBlock(s->body); execute(s->increment); }
         return;
     }
+    if(auto s = std::dynamic_pointer_cast<ReturnStmt>(stmt)) {
+        ReturnSignal sig;
+        if(s->value) sig.value = evalToValue(s->value);
+        throw sig;
+    }
+    if(auto s = std::dynamic_pointer_cast<ExprStmt>(stmt)) {
+        evalToValue(s->expr); // result discarded (e.g. a void function call)
+        return;
+    }
     throw std::runtime_error("Unknown statement.");
 }
 };
 
-void runProgram(const std::vector<StmtPtr>& program)
+void runProgram(const Program& program)
 {
-    Interpreter interpreter;
-    for(auto& stmt : program) interpreter.execute(stmt);
+    Interpreter interpreter(program.functions, program.structs);
+    try {
+        for(auto& stmt : program.statements) interpreter.execute(stmt);
+    } catch(ReturnSignal&) {
+        // a top-level 'return;' simply ends the program
+    }
 }
 
 std::string loadFile(const std::string& path)
