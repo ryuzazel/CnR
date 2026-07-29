@@ -1,0 +1,6 @@
+var[] nome = "jello, World!";
+print(string.nome);   // jello, World!
+
+nome[0] = 72;          // 72 = Ascii 'H'
+print(string.nome);   // Hello, World!
+print(nome[0]);        // 72

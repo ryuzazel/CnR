@@ -10,7 +10,7 @@
 #include <stdexcept>
 
 enum class TokType {
-    Number, Ident,
+    Number, Ident, String,
     Var, Print, If, Else, While, For, TrueKw, FalseKw, CharKw, LenKw,
     Function, Return, StructKw,
     Parallel, ThreadKw, JoinKw, JoinAllKw,
@@ -93,6 +93,34 @@ struct Lexer {
         }
         return {TokType::Number,s,std::stod(s),startLine};
     }
+    // Reads a double-quoted string literal, e.g. "String".
+    // Supports the escapes \n \t \" \\ ; the opening quote is consumed here
+    // (mirrors identifier()/number(), which are also called before the
+    // caller's peek() has been advanced past the first character).
+    Token stringLiteral() {
+        int startLine = line;
+        advance(); // consume opening '"'
+        std::string s;
+        while (peek() != '"') {
+            if (peek() == '\0')
+                throw std::runtime_error("Unterminated string literal starting at line " + std::to_string(startLine));
+            char c = advance();
+            if (c == '\\') {
+                char esc = advance();
+                switch (esc) {
+                    case 'n': s += '\n'; break;
+                    case 't': s += '\t'; break;
+                    case '"': s += '"'; break;
+                    case '\\': s += '\\'; break;
+                    default: s += esc; break;
+                }
+            } else {
+                s += c;
+            }
+        }
+        advance(); // consume closing '"'
+        return {TokType::String, s, 0, startLine};
+    }
     std::vector<Token> tokenize() {
         std::vector<Token> out;
         while (true) {
@@ -102,6 +130,7 @@ struct Lexer {
             int l=line;
             if (std::isdigit((unsigned char)c)) { out.push_back(number()); continue; }
             if (std::isalpha((unsigned char)c) || c=='_') { out.push_back(identifier()); continue; }
+            if (c=='"') { out.push_back(stringLiteral()); continue; }
             advance();
             switch(c) {
             case '+': out.push_back({TokType::Plus,"+",0,l}); break;
@@ -270,6 +299,18 @@ struct Parser {
         }
         expect(TokType::RParen,")");
         return call;
+    }
+
+    // Builds the arrayValues list for a string literal token (already consumed),
+    // one NumberExpr per character holding its ASCII code. This is how
+    // 'var s[] = "abc";' desugars into 'var s[] = {97,98,99};' -- strings are
+    // just sugar over the existing numeric-array machinery, nothing else
+    // downstream needs to know a string was ever involved.
+    std::vector<ExprPtr> stringToArrayValues(const std::string& text) {
+        std::vector<ExprPtr> values;
+        values.reserve(text.size());
+        for(unsigned char ch : text) values.push_back(std::make_shared<NumberExpr>((double)ch));
+        return values;
     }
 
     ExprPtr parseExpression() { return parseLogicalOr(); }
@@ -480,6 +521,21 @@ struct Parser {
         expect(TokType::Print,"print");
         expect(TokType::LParen,"(");
         auto stmt = std::make_shared<PrintStmt>();
+        // print(string.name) -- prints array 'name' as a string (its doubles
+        // read as ASCII codes), exactly like print((char[])name) below, just
+        // with friendlier syntax. "string" is not a reserved keyword, it's
+        // matched by text here, so it never collides with a variable/function
+        // that happens to be named "string" anywhere else in the language.
+        if(check(TokType::Ident) && peek().text=="string" && peek(1).type==TokType::Dot && peek(2).type==TokType::Ident) {
+            advance(); // string
+            advance(); // .
+            std::string arrName = advance().text; // array name
+            expect(TokType::RParen,")");
+            expect(TokType::Semicolon,";");
+            stmt->printCharArray = true;
+            stmt->arrayName = arrName;
+            return stmt;
+        }
         if(check(TokType::LParen) && peek(1).type==TokType::CharKw && peek(2).type==TokType::LBracket) {
             advance(); advance();
             expect(TokType::LBracket,"[");
@@ -509,12 +565,28 @@ struct Parser {
     StmtPtr parseVarDecl(bool consumeSemicolon = true) {
         expect(TokType::Var,"var");
         auto stmt = std::make_shared<VarDeclStmt>();
-        // var[] name; -- empty, growable array (filled later via .push())
+        // var[] name;                -- empty, growable array (filled later via .push())
+        // var[] name = "String";     -- growable array pre-filled with a string's ASCII codes
+        // var[] name = { 1, 2, 3 };  -- growable array pre-filled with numeric values
         if(check(TokType::LBracket) && peek(1).type == TokType::RBracket) {
             advance(); advance(); // [ ]
             stmt->name = expect(TokType::Ident,"identifier").text;
             stmt->isArray = true;
-            stmt->isEmptyArray = true;
+            if(match(TokType::Assign)) {
+                if(check(TokType::String)) {
+                    stmt->arrayValues = stringToArrayValues(advance().text);
+                } else {
+                    expect(TokType::LBrace,"{");
+                    while(true) {
+                        stmt->arrayValues.push_back(parseExpression());
+                        if(match(TokType::Comma)) continue;
+                        break;
+                    }
+                    expect(TokType::RBrace,"}");
+                }
+            } else {
+                stmt->isEmptyArray = true;
+            }
             if(consumeSemicolon) expect(TokType::Semicolon,";");
             return stmt;
         }
@@ -523,6 +595,13 @@ struct Parser {
             expect(TokType::RBracket,"]");
             stmt->isArray=true;
             expect(TokType::Assign,"=");
+            // var name[] = "String";     -- same string sugar as above
+            // var name[] = { 1, 2, 3 };  -- plain numeric array literal
+            if(check(TokType::String)) {
+                stmt->arrayValues = stringToArrayValues(advance().text);
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                return stmt;
+            }
             expect(TokType::LBrace,"{");
             while(true) {
                 stmt->arrayValues.push_back(parseExpression());
