@@ -1,0 +1,13 @@
+function square(var x)
+{
+    return x * x;
+}
+
+
+Parallel
+{
+    print(square(2));
+}
+{
+    print(square(4));
+}

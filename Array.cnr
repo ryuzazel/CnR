@@ -1,0 +1,30 @@
+var[] nums;
+
+nums.push(5);
+nums.push(3);
+nums.push(9);
+nums.push(1);
+nums.push(7);
+
+print(len(nums));         // 5
+print(nums.accumulate()); // 5+3+9+1+7 = 25
+
+nums.sort();
+print(nums[0]); // 1
+print(nums[1]); // 3
+print(nums[2]); // 5
+print(nums[3]); // 7
+print(nums[4]); // 9
+
+nums.reverse();
+print(nums[0]); // 9
+print(nums[4]); // 1
+
+print(nums.contains(5));   // 1
+print(nums.contains(100)); // 0
+print(nums.indexOf(1));    // 4 
+print(nums.indexOf(999));  // -1
+
+var last = nums.pop();
+print(last);       // 1
+print(len(nums));  // 4

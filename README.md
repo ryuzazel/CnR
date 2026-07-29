@@ -36,6 +36,10 @@ CnR currently uses **only double variables** as its native variable type.
 
 The language is designed around numerical computing, calculations and data processing.
 
+Will put string.var[] example1 = "ABC";
+and var[] example2 = {65, 66, 67};
+print(string.example2); -> "ABC"
+
 ---
 
 ## Control Flow
@@ -68,13 +72,12 @@ Future improvements:
 
 ## Arrays
 
-CnR currently supports arrays.
-
-Planned improvements:
-
+CnR currently supports:
 - Dynamic array operations
 - `push_back`
 - Accumulation functions
+Planned improvements:
+
 - Numerical transformations
 - More optimized array processing
 
@@ -101,13 +104,12 @@ The objective is to keep the CnR syntax simple while using C++ performance under
 
 # Native Threading
 
-CnR will support native multithreading.
-
-Planned capabilities:
-
+CnR currently supports:
 - Creating threads directly from CnR
-- Thread lifecycle management
 - Parallel execution
+Planned capabilities:
+- Lock, Mutable, Shared.
+- Thread lifecycle management
 - Runtime-controlled scheduling
 
 The goal is to abstract complex C++ concurrency while allowing high-performance parallel applications.

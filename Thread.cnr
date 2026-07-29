@@ -1,0 +1,42 @@
+function calculate(var start, var end)
+{
+    var sum = 0;
+
+    var i = start;
+
+    while(i < end)
+    {
+        sum = sum + i;
+        i = i + 1;
+    }
+
+    return sum;
+}
+
+
+var threads[] = {
+    thread(calculate, 0, 5),
+    thread(calculate, 5, 10),
+    thread(calculate, 10, 15),
+    thread(calculate, 15, 20)
+};
+
+
+var results = threads.joinAll();
+
+
+var total = 0;
+
+var i = 0;
+
+while(i < len(results))
+{
+    total = total + results[i];
+    i = i + 1;
+}
+
+
+print(total);
+
+
+
