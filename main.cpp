@@ -1,0 +1,658 @@
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <memory>
+#include <cctype>
+#include <stdexcept>
+
+enum class TokType {
+    Number, Ident,
+    Var, Print, If, Else, While, For, TrueKw, FalseKw, CharKw, LenKw,
+    Plus, Minus, Star, Slash, Percent,
+    Assign,
+    EqualEqual, BangEqual, Less, LessEqual, Greater, GreaterEqual,
+    AndAnd, OrOr, Bang,
+    Semicolon, Comma,
+    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
+    End
+};
+
+struct Token {
+    TokType type;
+    std::string text;
+    double number = 0.0;
+    int line = 1;
+};
+
+struct Lexer {
+    std::string src;
+    size_t pos = 0;
+    int line = 1;
+    Lexer(std::string s) : src(std::move(s)) {}
+    char peek(int off = 0) {
+        size_t p = pos + off;
+        if (p >= src.size()) return '\0';
+        return src[p];
+    }
+    char advance() {
+        char c = src[pos++];
+        if (c == '\n') line++;
+        return c;
+    }
+    bool match(char c) {
+        if (peek() != c) return false;
+        pos++;
+        return true;
+    }
+    void skipWhitespace() {
+        while (true) {
+            while (std::isspace((unsigned char)peek())) advance();
+            if (peek() == '/' && peek(1) == '/') {
+                while (peek() != '\n' && peek() != '\0') advance();
+                continue;
+            }
+            break;
+        }
+    }
+    Token identifier() {
+        int startLine = line;
+        std::string s;
+        while (std::isalnum((unsigned char)peek()) || peek() == '_') s += advance();
+        if (s == "var") return {TokType::Var,s,0,startLine};
+        if (s == "print") return {TokType::Print,s,0,startLine};
+        if (s == "if") return {TokType::If,s,0,startLine};
+        if (s == "else") return {TokType::Else,s,0,startLine};
+        if (s == "while") return {TokType::While,s,0,startLine};
+        if (s == "for") return {TokType::For,s,0,startLine};
+        if (s == "true") return {TokType::TrueKw,s,0,startLine};
+        if (s == "false") return {TokType::FalseKw,s,0,startLine};
+        if (s == "char") return {TokType::CharKw,s,0,startLine};
+        if (s == "len") return {TokType::LenKw,s,0,startLine};
+        return {TokType::Ident,s,0,startLine};
+    }
+    Token number() {
+        int startLine = line;
+        std::string s;
+        while (std::isdigit((unsigned char)peek())) s += advance();
+        if (peek()=='.') {
+            s+=advance();
+            while (std::isdigit((unsigned char)peek())) s+=advance();
+        }
+        return {TokType::Number,s,std::stod(s),startLine};
+    }
+    std::vector<Token> tokenize() {
+        std::vector<Token> out;
+        while (true) {
+            skipWhitespace();
+            if (peek()=='\0') { out.push_back({TokType::End,"",0,line}); break; }
+            char c=peek();
+            int l=line;
+            if (std::isdigit((unsigned char)c)) { out.push_back(number()); continue; }
+            if (std::isalpha((unsigned char)c) || c=='_') { out.push_back(identifier()); continue; }
+            advance();
+            switch(c) {
+            case '+': out.push_back({TokType::Plus,"+",0,l}); break;
+            case '-': out.push_back({TokType::Minus,"-",0,l}); break;
+            case '*': out.push_back({TokType::Star,"*",0,l}); break;
+            case '%': out.push_back({TokType::Percent,"%",0,l}); break;
+            case ';': out.push_back({TokType::Semicolon,";",0,l}); break;
+            case ',': out.push_back({TokType::Comma,",",0,l}); break;
+            case '(': out.push_back({TokType::LParen,"(",0,l}); break;
+            case ')': out.push_back({TokType::RParen,")",0,l}); break;
+            case '{': out.push_back({TokType::LBrace,"{",0,l}); break;
+            case '}': out.push_back({TokType::RBrace,"}",0,l}); break;
+            case '[': out.push_back({TokType::LBracket,"[",0,l}); break;
+            case ']': out.push_back({TokType::RBracket,"]",0,l}); break;
+            case '=':
+                if(match('=')) out.push_back({TokType::EqualEqual,"==",0,l});
+                else out.push_back({TokType::Assign,"=",0,l});
+                break;
+            case '!':
+                if(match('=')) out.push_back({TokType::BangEqual,"!=",0,l});
+                else out.push_back({TokType::Bang,"!",0,l});
+                break;
+            case '<':
+                if(match('=')) out.push_back({TokType::LessEqual,"<=",0,l});
+                else out.push_back({TokType::Less,"<",0,l});
+                break;
+            case '>':
+                if(match('=')) out.push_back({TokType::GreaterEqual,">=",0,l});
+                else out.push_back({TokType::Greater,">",0,l});
+                break;
+            case '&':
+                if(match('&')) { out.push_back({TokType::AndAnd,"&&",0,l}); break; }
+                throw std::runtime_error("Expected second '&'");
+            case '|':
+                if(match('|')) { out.push_back({TokType::OrOr,"||",0,l}); break; }
+                throw std::runtime_error("Expected second '|'");
+            case '/':
+                out.push_back({TokType::Slash,"/",0,l});
+                break;
+            default:
+                throw std::runtime_error("Unexpected character '"+std::string(1,c)+"'");
+            }
+        }
+        return out;
+    }
+};
+
+struct Expr { virtual ~Expr() = default; };
+struct Stmt { virtual ~Stmt() = default; };
+using ExprPtr = std::shared_ptr<Expr>;
+using StmtPtr = std::shared_ptr<Stmt>;
+
+struct NumberExpr : Expr { double value; NumberExpr(double v):value(v){} };
+struct BoolExpr : Expr { bool value; BoolExpr(bool v):value(v){} };
+struct VarExpr : Expr { std::string name; VarExpr(std::string n):name(std::move(n)){} };
+struct UnaryExpr : Expr { TokType op; ExprPtr expr; UnaryExpr(TokType o, ExprPtr e):op(o),expr(std::move(e)){} };
+struct BinaryExpr : Expr { TokType op; ExprPtr left; ExprPtr right; BinaryExpr(TokType o, ExprPtr l, ExprPtr r):op(o),left(std::move(l)),right(std::move(r)){} };
+struct CharCastExpr : Expr { ExprPtr expr; CharCastExpr(ExprPtr e):expr(std::move(e)){} };
+struct LenExpr : Expr { std::string arrayName; LenExpr(std::string n):arrayName(std::move(n)){} };
+struct ArrayAccessExpr : Expr { std::string arrayName; ExprPtr index; ArrayAccessExpr(std::string n, ExprPtr i):arrayName(std::move(n)),index(std::move(i)){} };
+
+struct VarDeclStmt : Stmt { bool isArray = false; std::string name; ExprPtr value; std::vector<ExprPtr> arrayValues; };
+struct AssignStmt : Stmt { std::string name; ExprPtr value; };
+struct ArrayAssignStmt : Stmt { std::string arrayName; ExprPtr index; ExprPtr value; };
+struct PrintStmt : Stmt { bool printChar=false; bool printCharArray=false; ExprPtr expr; std::string arrayName; };
+struct BlockStmt : Stmt { std::vector<StmtPtr> statements; };
+struct IfStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> thenBlock; std::shared_ptr<BlockStmt> elseBlock; };
+struct WhileStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> body; };
+struct ForStmt : Stmt { StmtPtr init; ExprPtr condition; StmtPtr increment; std::shared_ptr<BlockStmt> body; };
+
+struct Parser {
+    std::vector<Token> tokens;
+    size_t pos = 0;
+    Parser(std::vector<Token> t) : tokens(std::move(t)) {}
+
+    Token& peek(int off = 0) {
+        size_t p = pos + off;
+        if (p >= tokens.size()) return tokens.back();
+        return tokens[p];
+    }
+    bool check(TokType t) { return peek().type == t; }
+    bool match(TokType t) { if (!check(t)) return false; pos++; return true; }
+    Token advance() { return tokens[pos++]; }
+    Token expect(TokType t,const std::string& msg) {
+        if (!check(t)) {
+            throw std::runtime_error("Parse error line " + std::to_string(peek().line) + ": expected " + msg);
+        }
+        return advance();
+    }
+
+    ExprPtr parseExpression() { return parseLogicalOr(); }
+    ExprPtr parseLogicalOr() {
+        auto left = parseLogicalAnd();
+        while(match(TokType::OrOr)) {
+            auto right = parseLogicalAnd();
+            left = std::make_shared<BinaryExpr>(TokType::OrOr,left,right);
+        }
+        return left;
+    }
+    ExprPtr parseLogicalAnd() {
+        auto left = parseEquality();
+        while(match(TokType::AndAnd)) {
+            auto right = parseEquality();
+            left = std::make_shared<BinaryExpr>(TokType::AndAnd,left,right);
+        }
+        return left;
+    }
+    ExprPtr parseEquality() {
+        auto left = parseComparison();
+        while(true) {
+            if(match(TokType::EqualEqual)) { auto right = parseComparison(); left = std::make_shared<BinaryExpr>(TokType::EqualEqual,left,right); continue; }
+            if(match(TokType::BangEqual)) { auto right = parseComparison(); left = std::make_shared<BinaryExpr>(TokType::BangEqual,left,right); continue; }
+            break;
+        }
+        return left;
+    }
+    ExprPtr parseComparison() {
+        auto left = parseAddition();
+        while(true) {
+            if(match(TokType::Less)) { auto right = parseAddition(); left = std::make_shared<BinaryExpr>(TokType::Less,left,right); continue; }
+            if(match(TokType::LessEqual)) { auto right = parseAddition(); left = std::make_shared<BinaryExpr>(TokType::LessEqual,left,right); continue; }
+            if(match(TokType::Greater)) { auto right = parseAddition(); left = std::make_shared<BinaryExpr>(TokType::Greater,left,right); continue; }
+            if(match(TokType::GreaterEqual)) { auto right = parseAddition(); left = std::make_shared<BinaryExpr>(TokType::GreaterEqual,left,right); continue; }
+            break;
+        }
+        return left;
+    }
+    ExprPtr parseAddition() {
+        auto left = parseMultiplication();
+        while(true) {
+            if(match(TokType::Plus)) { auto right = parseMultiplication(); left = std::make_shared<BinaryExpr>(TokType::Plus,left,right); continue; }
+            if(match(TokType::Minus)) { auto right = parseMultiplication(); left = std::make_shared<BinaryExpr>(TokType::Minus,left,right); continue; }
+            break;
+        }
+        return left;
+    }
+    ExprPtr parseMultiplication() {
+        auto left = parseUnary();
+        while(true) {
+            if(match(TokType::Star)) { auto right = parseUnary(); left = std::make_shared<BinaryExpr>(TokType::Star,left,right); continue; }
+            if(match(TokType::Slash)) { auto right = parseUnary(); left = std::make_shared<BinaryExpr>(TokType::Slash,left,right); continue; }
+            if(match(TokType::Percent)) { auto right = parseUnary(); left = std::make_shared<BinaryExpr>(TokType::Percent,left,right); continue; }
+            break;
+        }
+        return left;
+    }
+    ExprPtr parseUnary() {
+        if(match(TokType::Minus)) return std::make_shared<UnaryExpr>(TokType::Minus, parseUnary());
+        if(match(TokType::Bang)) return std::make_shared<UnaryExpr>(TokType::Bang, parseUnary());
+        return parsePrimary();
+    }
+    ExprPtr parsePrimary() {
+        if(check(TokType::Number)) { double v = advance().number; return std::make_shared<NumberExpr>(v); }
+        if(match(TokType::TrueKw)) return std::make_shared<BoolExpr>(true);
+        if(match(TokType::FalseKw)) return std::make_shared<BoolExpr>(false);
+        if(match(TokType::LParen)) {
+            if(match(TokType::CharKw)) {
+                if(match(TokType::LBracket)) {
+                    expect(TokType::RBracket,"]");
+                    expect(TokType::RParen,")");
+                    auto id = expect(TokType::Ident,"identifier");
+                    auto p = std::make_shared<ArrayAccessExpr>(id.text, nullptr);
+                    return std::make_shared<CharCastExpr>(p);
+                }
+                expect(TokType::RParen,")");
+                auto e = parseUnary();
+                return std::make_shared<CharCastExpr>(e);
+            }
+            auto e = parseExpression();
+            expect(TokType::RParen,")");
+            return e;
+        }
+        if(match(TokType::LenKw)) {
+            expect(TokType::LParen,"(");
+            auto id = expect(TokType::Ident,"identifier");
+            expect(TokType::RParen,")");
+            return std::make_shared<LenExpr>(id.text);
+        }
+        if(check(TokType::Ident)) {
+            std::string name = advance().text;
+            if(match(TokType::LBracket)) {
+                auto idx = parseExpression();
+                expect(TokType::RBracket,"]");
+                return std::make_shared<ArrayAccessExpr>(name, idx);
+            }
+            return std::make_shared<VarExpr>(name);
+        }
+        throw std::runtime_error("Unexpected token on line " + std::to_string(peek().line));
+    }
+
+    std::shared_ptr<BlockStmt> parseBlock() {
+        expect(TokType::LBrace,"'{'");
+        auto block = std::make_shared<BlockStmt>();
+        while(!check(TokType::RBrace)) {
+            if(check(TokType::End))
+                throw std::runtime_error("Unexpected end of file: missing '}' to close block (opened near line " + std::to_string(peek().line) + ")");
+            block->statements.push_back(parseStatement());
+        }
+        expect(TokType::RBrace,"'}'");
+        return block;
+    }
+
+    StmtPtr parsePrint() {
+        expect(TokType::Print,"print");
+        expect(TokType::LParen,"(");
+        auto stmt = std::make_shared<PrintStmt>();
+        if(check(TokType::LParen) && peek(1).type==TokType::CharKw && peek(2).type==TokType::LBracket) {
+            advance(); advance();
+            expect(TokType::LBracket,"[");
+            expect(TokType::RBracket,"]");
+            expect(TokType::RParen,")");
+            stmt->printCharArray=true;
+            stmt->arrayName= expect(TokType::Ident,"identifier").text;
+            expect(TokType::RParen,")");
+            expect(TokType::Semicolon,";");
+            return stmt;
+        }
+        if(check(TokType::LParen) && peek(1).type==TokType::CharKw) {
+            advance(); advance();
+            expect(TokType::RParen,")");
+            stmt->printChar=true;
+            stmt->expr=parseExpression();
+            expect(TokType::RParen,")");
+            expect(TokType::Semicolon,";");
+            return stmt;
+        }
+        stmt->expr=parseExpression();
+        expect(TokType::RParen,")");
+        expect(TokType::Semicolon,";");
+        return stmt;
+    }
+
+    StmtPtr parseVarDecl(bool consumeSemicolon = true) {
+        expect(TokType::Var,"var");
+        auto stmt = std::make_shared<VarDeclStmt>();
+        stmt->name= expect(TokType::Ident,"identifier").text;
+        if(match(TokType::LBracket)) {
+            expect(TokType::RBracket,"]");
+            stmt->isArray=true;
+            expect(TokType::Assign,"=");
+            expect(TokType::LBrace,"{");
+            while(true) {
+                stmt->arrayValues.push_back(parseExpression());
+                if(match(TokType::Comma)) continue;
+                break;
+            }
+            expect(TokType::RBrace,"}");
+            if(consumeSemicolon) expect(TokType::Semicolon,";");
+            return stmt;
+        }
+        expect(TokType::Assign,"=");
+        stmt->value=parseExpression();
+        if(consumeSemicolon) expect(TokType::Semicolon,";");
+        return stmt;
+    }
+
+    StmtPtr parseAssignmentStatement(bool consumeSemicolon = true) {
+        auto id= expect(TokType::Ident,"identifier");
+        if(match(TokType::LBracket)) {
+            auto stmt= std::make_shared<ArrayAssignStmt>();
+            stmt->arrayName=id.text;
+            stmt->index=parseExpression();
+            expect(TokType::RBracket,"]");
+            expect(TokType::Assign,"=");
+            stmt->value=parseExpression();
+            if(consumeSemicolon) expect(TokType::Semicolon,";");
+            return stmt;
+        }
+        auto stmt= std::make_shared<AssignStmt>();
+        stmt->name=id.text;
+        expect(TokType::Assign,"=");
+        stmt->value=parseExpression();
+        if(consumeSemicolon) expect(TokType::Semicolon,";");
+        return stmt;
+    }
+
+    StmtPtr parseIf() {
+        expect(TokType::If,"if");
+        expect(TokType::LParen,"(");
+        auto stmt = std::make_shared<IfStmt>();
+        stmt->condition = parseExpression();
+        expect(TokType::RParen,")");
+        stmt->thenBlock = parseBlock();
+        if(match(TokType::Else)) stmt->elseBlock = parseBlock();
+        return stmt;
+    }
+
+    StmtPtr parseWhile() {
+        expect(TokType::While,"while");
+        expect(TokType::LParen,"(");
+        auto stmt = std::make_shared<WhileStmt>();
+        stmt->condition = parseExpression();
+        expect(TokType::RParen,")");
+        stmt->body = parseBlock();
+        return stmt;
+    }
+
+    StmtPtr parseFor() {
+        expect(TokType::For,"for");
+        expect(TokType::LParen,"(");
+        auto stmt = std::make_shared<ForStmt>();
+        if(check(TokType::Var)) stmt->init = parseVarDecl(true);
+        else stmt->init = parseAssignmentStatement(true);
+        stmt->condition = parseExpression();
+        expect(TokType::Semicolon,";");
+        stmt->increment = parseAssignmentStatement(false);
+        expect(TokType::RParen,")");
+        stmt->body = parseBlock();
+        return stmt;
+    }
+
+    StmtPtr parseStatement() {
+        if(check(TokType::Var)) return parseVarDecl();
+        if(check(TokType::Print)) return parsePrint();
+        if(check(TokType::If)) return parseIf();
+        if(check(TokType::While)) return parseWhile();
+        if(check(TokType::For)) return parseFor();
+        if(check(TokType::Ident)) return parseAssignmentStatement();
+        throw std::runtime_error("Unexpected statement on line " + std::to_string(peek().line));
+    }
+
+    std::vector<StmtPtr> parseProgram() {
+        std::vector<StmtPtr> prog;
+        while(!check(TokType::End)) prog.push_back(parseStatement());
+        return prog;
+    }
+};
+
+struct Value {
+    bool isArray = false;
+    bool isBool = false;
+    double number = 0;
+    std::vector<double> array;
+    bool boolean = false;
+};
+
+class Interpreter {
+public:
+    std::unordered_map<std::string, Value> vars;
+Value& lookupVar(const std::string& name) {
+    auto it = vars.find(name);
+    if(it == vars.end())
+        throw std::runtime_error("Undefined variable '" + name + "'");
+    return it->second;
+}
+
+double evalNumber(const ExprPtr& expr)
+{
+    if(auto n = std::dynamic_pointer_cast<NumberExpr>(expr)) return n->value;
+
+    if(auto bo = std::dynamic_pointer_cast<BoolExpr>(expr)) return bo->value ? 1.0 : 0.0;
+
+    if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+        Value& val = lookupVar(v->name);
+        if(val.isArray)
+            throw std::runtime_error("Cannot use array '" + v->name + "' as a number");
+        if(val.isBool) return val.boolean ? 1.0 : 0.0;
+        return val.number;
+    }
+
+    if(auto u = std::dynamic_pointer_cast<UnaryExpr>(expr)) {
+        if(u->op==TokType::Bang) return evalBool(u->expr) ? 0.0 : 1.0;
+        double x = evalNumber(u->expr);
+        if(u->op==TokType::Minus) return -x;
+        return x;
+    }
+
+    if(auto cc = std::dynamic_pointer_cast<CharCastExpr>(expr)) {
+        return evalNumber(cc->expr);
+    }
+
+    if(auto b = std::dynamic_pointer_cast<BinaryExpr>(expr)) {
+        // Logical operators short-circuit and produce 0/1
+        if(b->op==TokType::AndAnd) return (evalBool(b->left) && evalBool(b->right)) ? 1.0 : 0.0;
+        if(b->op==TokType::OrOr) return (evalBool(b->left) || evalBool(b->right)) ? 1.0 : 0.0;
+
+        double L = evalNumber(b->left);
+        double R = evalNumber(b->right);
+        switch(b->op) {
+        case TokType::Plus: return L+R;
+        case TokType::Minus: return L-R;
+        case TokType::Star: return L*R;
+        case TokType::Slash:
+            if(R==0) throw std::runtime_error("Division by zero");
+            return L/R;
+        case TokType::Percent:
+            if((int)R==0) throw std::runtime_error("Modulo by zero");
+            return (int)L%(int)R;
+        case TokType::Less: return L<R ? 1.0 : 0.0;
+        case TokType::Greater: return L>R ? 1.0 : 0.0;
+        case TokType::LessEqual: return L<=R ? 1.0 : 0.0;
+        case TokType::GreaterEqual: return L>=R ? 1.0 : 0.0;
+        case TokType::EqualEqual: return L==R ? 1.0 : 0.0;
+        case TokType::BangEqual: return L!=R ? 1.0 : 0.0;
+        default: break;
+        }
+    }
+
+    if(auto a = std::dynamic_pointer_cast<ArrayAccessExpr>(expr)) {
+        if(!a->index)
+            throw std::runtime_error("Array '" + a->arrayName + "' used without an index in this context");
+        Value& val = lookupVar(a->arrayName);
+        if(!val.isArray)
+            throw std::runtime_error("'" + a->arrayName + "' is not an array");
+        int index = (int)evalNumber(a->index);
+        if(index < 0 || index >= (int)val.array.size())
+            throw std::runtime_error("Array index out of bounds for '" + a->arrayName + "': " + std::to_string(index));
+        return val.array[index];
+    }
+
+    if(auto l = std::dynamic_pointer_cast<LenExpr>(expr)) {
+        Value& val = lookupVar(l->arrayName);
+        if(!val.isArray)
+            throw std::runtime_error("'" + l->arrayName + "' is not an array");
+        return (double)val.array.size();
+    }
+
+    throw std::runtime_error("Cannot evaluate numeric expression.");
+}
+bool evalBool(const ExprPtr& expr)
+{
+    if(auto b = std::dynamic_pointer_cast<BoolExpr>(expr)) return b->value;
+
+    if(auto u = std::dynamic_pointer_cast<UnaryExpr>(expr)) {
+        if(u->op==TokType::Bang) return !evalBool(u->expr);
+    }
+
+    if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+        Value& val = lookupVar(v->name);
+        if(val.isBool) return val.boolean;
+        return val.number != 0;
+    }
+
+    if(auto op = std::dynamic_pointer_cast<BinaryExpr>(expr)) {
+        switch(op->op) {
+        case TokType::AndAnd: return evalBool(op->left) && evalBool(op->right);
+        case TokType::OrOr: return evalBool(op->left) || evalBool(op->right);
+        case TokType::Less:
+        case TokType::Greater:
+        case TokType::LessEqual:
+        case TokType::GreaterEqual:
+        case TokType::EqualEqual:
+        case TokType::BangEqual: {
+            double L = evalNumber(op->left);
+            double R = evalNumber(op->right);
+            switch(op->op) {
+            case TokType::Less: return L<R;
+            case TokType::Greater: return L>R;
+            case TokType::LessEqual: return L<=R;
+            case TokType::GreaterEqual: return L>=R;
+            case TokType::EqualEqual: return L==R;
+            case TokType::BangEqual: return L!=R;
+            default: break;
+            }
+        }
+        default: break;
+        }
+    }
+
+    return evalNumber(expr)!=0;
+}
+void executeBlock(const std::shared_ptr<BlockStmt>& block) {
+    for(auto& stmt : block->statements) execute(stmt);
+}
+void execute(const StmtPtr& stmt)
+{
+    if(auto s = std::dynamic_pointer_cast<VarDeclStmt>(stmt)) {
+        Value value;
+        value.isArray = s->isArray;
+        if(s->isArray) {
+            for(auto& e : s->arrayValues) value.array.push_back(evalNumber(e));
+        } else if(auto boolLit = std::dynamic_pointer_cast<BoolExpr>(s->value)) {
+            value.isBool = true;
+            value.boolean = boolLit->value;
+        } else {
+            value.number = evalNumber(s->value);
+        }
+        vars[s->name]=value;
+        return;
+    }
+    if(auto s = std::dynamic_pointer_cast<AssignStmt>(stmt)) {
+        Value& val = lookupVar(s->name);
+        if(val.isArray)
+            throw std::runtime_error("Cannot assign a number to array '" + s->name + "'");
+        if(auto boolLit = std::dynamic_pointer_cast<BoolExpr>(s->value)) {
+            val.isBool = true;
+            val.boolean = boolLit->value;
+        } else {
+            val.isBool = false;
+            val.number = evalNumber(s->value);
+        }
+        return;
+    }
+    if(auto s = std::dynamic_pointer_cast<ArrayAssignStmt>(stmt)) {
+        Value& val = lookupVar(s->arrayName);
+        if(!val.isArray)
+            throw std::runtime_error("'" + s->arrayName + "' is not an array");
+        int index = (int)evalNumber(s->index);
+        if(index < 0 || index >= (int)val.array.size())
+            throw std::runtime_error("Array index out of bounds for '" + s->arrayName + "': " + std::to_string(index));
+        val.array[index] = evalNumber(s->value);
+        return;
+    }
+    if(auto s = std::dynamic_pointer_cast<PrintStmt>(stmt)) {
+        if(s->printCharArray) {
+            auto& arr = vars[s->arrayName].array;
+            for(double c : arr) std::cout << (char)c;
+            std::cout << '\n';
+            return;
+        }
+        if(s->printChar) { std::cout << (char)evalNumber(s->expr); return; }
+        std::cout << evalNumber(s->expr) << '\n';
+        return;
+    }
+    if(auto s = std::dynamic_pointer_cast<IfStmt>(stmt)) {
+        if(evalBool(s->condition)) executeBlock(s->thenBlock);
+        else if(s->elseBlock) executeBlock(s->elseBlock);
+        return;
+    }
+    if(auto s = std::dynamic_pointer_cast<WhileStmt>(stmt)) {
+        while(evalBool(s->condition)) executeBlock(s->body);
+        return;
+    }
+    if(auto s = std::dynamic_pointer_cast<ForStmt>(stmt)) {
+        execute(s->init);
+        while(evalBool(s->condition)) { executeBlock(s->body); execute(s->increment); }
+        return;
+    }
+    throw std::runtime_error("Unknown statement.");
+}
+};
+
+void runProgram(const std::vector<StmtPtr>& program)
+{
+    Interpreter interpreter;
+    for(auto& stmt : program) interpreter.execute(stmt);
+}
+
+std::string loadFile(const std::string& path)
+{
+    std::ifstream in(path);
+    if(!in) throw std::runtime_error("Cannot open file: " + path);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+int main(int argc,char** argv)
+{
+    if(argc!=2) { std::cout << "Usage:\n" << "    CnR program.CnR\n"; return 1; }
+    try {
+        std::string source = loadFile(argv[1]);
+        Lexer lexer(source);
+        auto tokens = lexer.tokenize();
+        Parser parser(tokens);
+        auto program = parser.parseProgram();
+        runProgram(program);
+    }
+    catch(const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    }
+    return 0;
+}

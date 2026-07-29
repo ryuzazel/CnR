@@ -1,0 +1,79 @@
+var x1[] = {
+1,0,0,0,1,0,0,2,0,0
+};
+
+var x2[] = {
+0,1,0,0,1,0,0,0,2,0
+};
+
+var x3[] = {
+0,0,1,0,0,1,0,0,0,2
+};
+
+var y[] = {
+11,   
+3,  
+6,    
+1,   
+13,  
+6,    
+1,   
+21,  
+5,   
+11    
+};
+
+var w1 = 0;
+var w2 = 0;
+var w3 = 0;
+var b = 0;
+
+var lr = 0.01;
+
+var epoch = 0;
+
+while(epoch < 20000)
+{
+    var dw1 = 0;
+    var dw2 = 0;
+    var dw3 = 0;
+    var db = 0;
+
+    var i = 0;
+
+    while(i < len(x1))
+    {
+        var pred = 0;
+
+        pred = pred + w1 * x1[i];
+        pred = pred + w2 * x2[i];
+        pred = pred + w3 * x3[i];
+        pred = pred + b;
+
+        var err = pred - y[i];
+
+        dw1 = dw1 + err * x1[i];
+        dw2 = dw2 + err * x2[i];
+        dw3 = dw3 + err * x3[i];
+
+        db = db + err;
+
+        i = i + 1;
+    }
+
+    var n = len(x1);
+
+    w1 = w1 - lr * (dw1 / n);
+    w2 = w2 - lr * (dw2 / n);
+    w3 = w3 - lr * (dw3 / n);
+    b  = b  - lr * (db / n);
+
+    lr = lr * 0.99995;
+
+    epoch = epoch + 1;
+}
+
+print(w1);
+print(w2);
+print(w3);
+print(b);

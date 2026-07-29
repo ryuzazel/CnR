@@ -1,0 +1,105 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+
+  "name": "CnR",
+
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#booleans"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#variables"
+    }
+  ],
+
+  "repository": {
+
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.cnr",
+          "match": "\\b(var|if|else|while|for|return|break|continue|function)\\b"
+        }
+      ]
+    },
+
+    "functions": {
+      "patterns": [
+        {
+          "name": "support.function.cnr",
+          "match": "\\b(print|len)\\b"
+        }
+      ]
+    },
+
+    "booleans": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.cnr",
+          "match": "\\b(true|false|null)\\b"
+        }
+      ]
+    },
+
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.cnr",
+          "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+        }
+      ]
+    },
+
+    "strings": {
+      "name": "string.quoted.double.cnr",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.cnr",
+          "match": "\\\\."
+        }
+      ]
+    },
+
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.cnr",
+          "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.cnr",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.cnr",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    }
+  },
+
+  "scopeName": "source.cnr"
+}
