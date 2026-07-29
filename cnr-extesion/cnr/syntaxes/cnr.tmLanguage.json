@@ -14,6 +14,9 @@
       "include": "#keywords"
     },
     {
+      "include": "#types"
+    },
+    {
       "include": "#structs"
     },
     {
@@ -21,6 +24,12 @@
     },
     {
       "include": "#functions"
+    },
+    {
+      "include": "#parallel"
+    },
+    {
+      "include": "#threads"
     },
     {
       "include": "#booleans"
@@ -36,13 +45,24 @@
     }
   ],
 
+
   "repository": {
 
     "keywords": {
       "patterns": [
         {
           "name": "keyword.control.cnr",
-          "match": "\\b(var|if|else|while|for|return|break|continue|function|Struct)\\b"
+          "match": "\\b(var|if|else|while|for|return|break|continue|function)\\b"
+        }
+      ]
+    },
+
+
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.cnr",
+          "match": "\\b(string|int|double|bool)\\b"
         }
       ]
     },
@@ -76,7 +96,27 @@
       "patterns": [
         {
           "name": "support.function.cnr",
-          "match": "\\b(print|len|push_back|pop_back|sort|accumulate|train|predict|roots|integral|derivative)\\b"
+          "match": "\\b(print|len|push|pop|push_back|pop_back|sort|reverse|accumulate|contains|indexOf|train|predict|roots|integral|derivative)\\b"
+        }
+      ]
+    },
+
+
+    "parallel": {
+      "patterns": [
+        {
+          "name": "keyword.control.parallel.cnr",
+          "match": "\\bParallel\\b"
+        }
+      ]
+    },
+
+
+    "threads": {
+      "patterns": [
+        {
+          "name": "support.function.thread.cnr",
+          "match": "\\b(thread|join|joinAll|await)\\b"
         }
       ]
     },
@@ -119,7 +159,7 @@
       "patterns": [
         {
           "name": "keyword.operator.cnr",
-          "match": "(\\+|-|\\*|/|%|==|!=|<=|>=|<|>|=|&&|\\|\\|)"
+          "match": "(\\+|-|\\*|/|%|==|!=|<=|>=|<|>|=|&&|\\|\\||\\.)"
         }
       ]
     },
