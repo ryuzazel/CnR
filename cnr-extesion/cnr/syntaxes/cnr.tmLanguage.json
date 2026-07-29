@@ -23,6 +23,18 @@
       "include": "#function-declarations"
     },
     {
+      "include": "#http-client"
+    },
+    {
+      "include": "#server"
+    },
+    {
+      "include": "#routes"
+    },
+    {
+      "include": "#request-response"
+    },
+    {
       "include": "#functions"
     },
     {
@@ -52,7 +64,7 @@
       "patterns": [
         {
           "name": "keyword.control.cnr",
-          "match": "\\b(var|if|else|while|for|return|break|continue|function)\\b"
+          "match": "\\b(var|if|else|while|for|return|function)\\b"
         }
       ]
     },
@@ -62,7 +74,7 @@
       "patterns": [
         {
           "name": "storage.type.cnr",
-          "match": "\\b(string|int|double|bool)\\b"
+          "match": "\\b(string|char)\\b"
         }
       ]
     },
@@ -92,11 +104,94 @@
     },
 
 
+    "http-client": {
+      "comment": "Http.GET/POST/PUT/PATCH/DELETE(url) { header {...} body {...} }",
+      "patterns": [
+        {
+          "match": "\\b(Http)\\s*(\\.)\\s*(GET|POST|PUT|PATCH|DELETE)\\b",
+          "captures": {
+            "1": { "name": "support.class.http.cnr" },
+            "2": { "name": "keyword.operator.cnr" },
+            "3": { "name": "support.function.http-method.cnr" }
+          }
+        },
+        {
+          "name": "keyword.other.http-block.cnr",
+          "match": "\\b(header|body)\\b(?=\\s*\\{)"
+        }
+      ]
+    },
+
+
+    "server": {
+      "comment": "var server = Server() { host = ...; port = ...; };",
+      "patterns": [
+        {
+          "name": "support.class.server.cnr",
+          "match": "\\bServer\\b(?=\\s*\\()"
+        },
+        {
+          "name": "variable.parameter.server-config.cnr",
+          "match": "\\b(host|port|https|certificate|privateKey|threads|backlog|keepAlive|maxBodySize|readTimeout|writeTimeout|cors|serverName|logRequests)\\b(?=\\s*=)"
+        }
+      ]
+    },
+
+
+    "routes": {
+      "comment": "server.GET(\"/path\") { ... }; and server.start();",
+      "patterns": [
+        {
+          "match": "(\\.)\\s*(GET|POST|PUT|PATCH|DELETE)\\b(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "keyword.operator.cnr" },
+            "2": { "name": "support.function.http-method.cnr" }
+          }
+        },
+        {
+          "name": "support.function.server-lifecycle.cnr",
+          "match": "(?<=\\.)\\bstart\\b(?=\\s*\\()"
+        }
+      ]
+    },
+
+
+    "request-response": {
+      "comment": "request.method/path/ip/params/query/header/cookie/body/json and response.status/header()/cookie()/redirect()",
+      "patterns": [
+        {
+          "match": "\\b(request)\\b\\s*(\\.)\\s*(method|path|ip|params|query|header|cookie|body|json|contentType|contentLength)\\b",
+          "captures": {
+            "1": { "name": "variable.language.request.cnr" },
+            "2": { "name": "keyword.operator.cnr" },
+            "3": { "name": "variable.other.property.cnr" }
+          }
+        },
+        {
+          "match": "\\b(response)\\b\\s*(\\.)\\s*(status)\\b",
+          "captures": {
+            "1": { "name": "variable.language.response.cnr" },
+            "2": { "name": "keyword.operator.cnr" },
+            "3": { "name": "variable.other.property.cnr" }
+          }
+        },
+        {
+          "match": "\\b(response)\\b\\s*(\\.)\\s*(header|cookie|redirect)\\b(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "variable.language.response.cnr" },
+            "2": { "name": "keyword.operator.cnr" },
+            "3": { "name": "support.function.response-method.cnr" }
+          }
+        }
+      ]
+    },
+
+
     "functions": {
       "patterns": [
         {
           "name": "support.function.cnr",
-          "match": "\\b(print|len|push|pop|push_back|pop_back|sort|reverse|accumulate|contains|indexOf|train|predict|roots|integral|derivative)\\b"
+          "match": "\\b(print|len|push|pop|sort|reverse|accumulate|contains|indexOf)\\b"
         }
       ]
     },
@@ -116,7 +211,7 @@
       "patterns": [
         {
           "name": "support.function.thread.cnr",
-          "match": "\\b(thread|join|joinAll|await)\\b"
+          "match": "\\b(thread|join|joinAll)\\b"
         }
       ]
     },
@@ -126,7 +221,7 @@
       "patterns": [
         {
           "name": "constant.language.boolean.cnr",
-          "match": "\\b(true|false|null)\\b"
+          "match": "\\b(true|false)\\b"
         }
       ]
     },

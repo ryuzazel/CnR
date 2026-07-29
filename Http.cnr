@@ -1,0 +1,75 @@
+
+var server = Server() {
+    host = "0.0.0.0";
+    port = 8080;
+    https = false;
+    threads = 8;
+    backlog = 1024;
+    keepAlive = true;
+    readTimeout = 30;
+    writeTimeout = 30;
+    serverName = "CnR HTTP";
+    logRequests = true;
+};
+
+server.GET("/") {
+    response.status = 200;
+    response.header("Content-Type", "text/plain");
+    return "CnR HTTP Server rodando!";
+};
+
+
+server.GET("/users/:id") {
+    print("==== REQUEST ====");
+    print((string)request.method);
+    print((string)request.path);
+    print((string)request.params.id);
+    print((string)request.query.page);   
+    print((string)request.query.sort);
+    print((string)request.header["Authorization"]);
+    print((string)request.header["User-Agent"]);
+    print((string)request.cookie["session"]);
+    print((string)request.ip);
+
+    response.header("Content-Type", "application/json");
+    return { "status": "ok", "id": request.params.id };
+};
+
+
+server.POST("/login") {
+    print("==== LOGIN ====");
+    print((string)request.contentType);
+    print(request.contentLength);
+    print((string)request.body);
+
+    var json = request.json;
+    print((string)json.username);
+    print((string)json.password);
+
+    response.status = 200;
+    response.header("Content-Type", "application/json");
+    response.cookie("session", "ABC123456", 3600);
+    return { "success": true, "user": json.username };
+};
+
+
+server.PUT("/users/:id") {
+    print("==== PUT ====");
+    print((string)request.params.id);
+    print((string)request.body);
+    response.status = 204;
+};
+
+
+server.DELETE("/users/:id") {
+    print("==== DELETE ====");
+    print((string)request.params.id);
+    response.status = 204;
+};
+
+
+server.GET("/old-page") {
+    response.redirect("/");
+};
+
+server.start();

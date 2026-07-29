@@ -36,9 +36,6 @@ CnR currently uses **only double variables** as its native variable type.
 
 The language is designed around numerical computing, calculations and data processing.
 
-Will put string.var[] example1 = "ABC";
-and var[] example2 = {65, 66, 67};
-print(string.example2); -> "ABC"
 
 ---
 
@@ -118,7 +115,7 @@ The goal is to abstract complex C++ concurrency while allowing high-performance 
 
 # Networking / Web
 
-Future native networking system:
+CnR currently supports:
 
 - Socket support
 - HTTP requests

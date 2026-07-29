@@ -1,0 +1,26 @@
+
+
+var r1 = Http.GET("http://localhost:8080/users/55") {
+    header {
+        "Authorization" = "Bearer testtoken";
+    }
+};
+print("GET /users/55 -> status:");
+print(r1.status);
+var d1 = r1.json;
+print((string)d1.id);
+print((string)d1.status);
+
+var r2 = Http.POST("http://localhost:8080/login") {
+    header {
+        "Content-Type" = "application/json";
+    }
+    body {
+        "username" = "TEST";
+        "password" = "PASSWORD";
+    }
+};
+print("POST /login -> status:");
+print(r2.status);
+var d2 = r2.json;
+print((string)d2.user);
