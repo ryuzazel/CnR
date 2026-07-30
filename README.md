@@ -1,243 +1,131 @@
-# CnR - Compile N Run
+<div align="center">
 
-<p align="center">
-  <b>A mathematical, concurrent and high-performance programming language powered by a C++ runtime.</b>
-</p>
+# CnR — Compile N Run
+
+### A mathematical, concurrent, and high-performance programming language, powered by a native C++ runtime.
+
+<br>
+
+`Variables` · `Control Flow` · `Functions & Structs` · `Arrays` · `Threading & Parallel` · `HTTP Client & Server` · `DAG Workflows` · `Try/Catch`
+
+</div>
 
 ---
 
-# Overview
+## Overview
 
-**CnR (Compile N Run)** is a custom programming language designed to combine simple syntax with the performance and capabilities of a native C++ runtime.
+**CnR (Compile N Run)** is a custom programming language built to pair a small, readable syntax with the raw performance of a native C++ runtime underneath it.
 
-The core idea:
+The core idea is simple:
 
-- The user writes code in CnR.
-- The C++ runtime executes optimized operations internally.
-- CnR manages communication between systems, allowing a simpler programming experience while maintaining high performance.
+- You write code in **CnR** — clean, minimal, expressive.
+- The **C++ runtime** does the heavy lifting — parsing, executing, and optimizing under the hood.
+- CnR handles the plumbing in between, so you get a simple programming experience without giving up performance.
 
-CnR is focused on:
+CnR is being designed with a clear focus on:
 
-- Scientific computing
-- Mathematics
+- Scientific & mathematical computing
 - Artificial Intelligence
-- Parallel programming
+- Parallel & concurrent programming
 - Networking
 - Databases
-- Workflow execution
+- Workflow / DAG execution
+
+> Want to see it in action? This repo includes real, runnable `.cnr` example files for every feature below — check the file mentioned in each section to see working code.
 
 ---
 
-# Current Features
+## Current Features
 
-## Variables
+### Variables
 
-CnR currently uses **only double variables** as its native variable type.
+CnR currently uses **double-precision numbers as its native numeric type**, along with strings, booleans, arrays, structs, and objects built on top of them. The language is designed around numerical computing, calculation, and data processing first.
 
-The language is designed around numerical computing, calculations and data processing.
+> See `Hello.cnr` for a minimal first program.
 
+### Control Flow
 
----
+CnR supports the structures you'd expect from any general-purpose language:
 
-## Control Flow
+- `if` / `else`
+- `while` loops
+- `for` loops
+- Standard comparison & logical operators (`==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`)
 
-CnR currently supports programming logic structures:
-
-- `if`
-- `else`
-- loops
-- conditional execution
-- iteration structures
-
----
-
-## Functions
+### Functions & Structs
 
 CnR currently supports:
 
-- Function declaration
-- Function execution
-- Return values
-- Structs
+- Function declaration & invocation (`function`)
+- Return values (`return`)
+- Struct declarations with constructors and fields (`Struct`)
 
-Future improvements:
-- More advanced function systems
-- Better function composition
-- Additional language abstractions
+> See `linearRegression.cnr` for a full example combining structs, functions, arrays, and loops — a linear regression model trained with gradient descent, entirely in CnR.
 
----
+**Planned improvements:** more advanced function systems, better function composition, and additional language abstractions.
 
-## Arrays
+### Arrays
 
-CnR currently supports:
-- Dynamic array operations
-- `push_back`
-- Accumulation functions
-Planned improvements:
+CnR currently supports dynamic, numeric arrays with built-in methods:
 
-- Numerical transformations
-- More optimized array processing
+- `push`, `pop`
+- `sort`, `reverse`
+- `contains`, `indexOf`
+- `accumulate`
+- `len(...)`
 
----
+> See `Array.cnr` for array declaration and method usage.
 
-# Runtime in C++
+**Planned improvements:** numerical transformations and more optimized array processing.
 
-CnR uses a C++ runtime responsible for executing the language.
+### Error Handling — `try` / `catch` / `Throw`
 
-The runtime handles:
+CnR supports structured exception handling:
 
-- Internal execution
-- Performance-critical operations
-- Native integrations
-- System communication
+- `try { ... } catch(var e) { ... }` — catches thrown errors **and** ordinary runtime errors (division by zero, out-of-bounds access, etc.), binding the message to `e` as a string.
+- `Throw("message");` — raises your own catchable error.
 
-The objective is to keep the CnR syntax simple while using C++ performance underneath.
+> See `TryCatch.cnr` for division-by-zero, out-of-bounds, and custom `Throw()` examples.
 
 ---
 
-# Future Features
-
----
-
-# Native Threading
-
-CnR currently supports:
-- Creating threads directly from CnR
-- Parallel execution
-Planned capabilities:
-- Lock, Mutable, Shared.
-- Thread lifecycle management
-- Runtime-controlled scheduling
-
-The goal is to abstract complex C++ concurrency while allowing high-performance parallel applications.
-
----
-
-# Networking / Web
+## Native Threading & Parallelism
 
 CnR currently supports:
 
-- Socket support
-- HTTP requests
-- HTTP servers
-- Web communication
+- Spawning threads directly from CnR with `thread(...)`, and collecting results with `join()` / `joinAll()`
+- Running multiple blocks concurrently with `Parallel { } { } ...`
 
-Future web ecosystem:
+> See `Thread.cnr` for `thread()`/`join()` examples, and `Parallel.cnr` for `Parallel{}` blocks.
 
-- HTML/template integration
-- Native backend development
-- Integrated web stack
+**Planned capabilities:** locks, mutable/shared state primitives, thread lifecycle management, and runtime-controlled scheduling — abstracting complex C++ concurrency while keeping high-performance parallel code accessible.
 
 ---
 
-# Native Database System
+## DAG Execution System — `Nodes`
 
-CnR will include a native database engine.
+CnR includes a **Directed Acyclic Graph workflow system** for orchestrating dependent tasks, expressed directly in the language via the `Nodes { }` statement.
 
-Planned features:
+**Currently supported:**
 
-- Custom `.cnrdb` database format
-- Database syntax inside the language
-- Tables
-- Records
-- Persistence
-- C++ database engine integration
+- Declaring named nodes with dependencies: `Step2(Step1) { ... }`
+- Automatic execution ordering based on the dependency graph
+- Nodes with satisfied dependencies at the same "depth" run **in parallel**, as threads
+- Retry policies per node: `OnFail(Retry = N)`
+- Explicit node failure via `Fail();`
+- Automatic skipping of nodes whose dependencies failed, without aborting the rest of the workflow
+- Cycle detection with clear error reporting
 
-The goal is to provide database functionality without requiring external systems for common use cases.
+**Example execution concept:**
 
----
-
-# MathLib Integration
-
-The existing C++ MathLib will be integrated directly into CnR.
-
-Planned available mathematical capabilities:
-
-## Algebra
-
-- Algebraic operations
-- Expression manipulation
-- Polynomial operations
-
-## Linear Algebra
-
-- Vectors
-- Matrices
-- Tensors
-
-## Calculus
-
-- Derivatives
-- Integrals
-- Limits
-
-## Statistics
-
-- Statistical functions
-- Numerical analysis
-
-## Optimization
-
-- Optimization algorithms
-- Numerical solvers
-
-## Polynomial Mathematics
-
-- Polynomial manipulation
-- Root calculation
-- Advanced numerical methods
-- Durand-Kerner method
-
-## Symbolic Mathematics
-
-Using the parser AST:
-
-- Symbolic expressions
-- Mathematical transformations
-- Expression analysis
-
----
-
-# Native Neural Network System
-
-CnR will support native neural network development.
-
-Planned capabilities:
-
-- Tensor operations
-- Matrix calculations
-- Automatic differentiation
-- Backpropagation
-- Gradient computation
-- Optimization algorithms
-- Neural network models defined directly in CnR
-
-The objective is to allow AI systems to be created using native CnR syntax while the runtime executes optimized C++ operations.
-
----
-
-# DAG Execution System
-
-CnR will include a Directed Acyclic Graph execution system for task orchestration.
-
-The system will allow programs to represent execution dependencies between nodes.
-
-Features:
-
-- Node states
-- Dependency management
-- Automatic execution ordering
-- Parallel node execution
-- Workflow tracking
-
-Example execution concept:
-
-- Node A runs
-- Node A completes successfully
-- Node B becomes available
-- Node B finishes
-- Nodes C and D execute in parallel
-- Node E runs after dependencies complete
+```
+Node A runs
+Node A completes successfully
+Node B becomes available
+Node B finishes
+Nodes C and D execute in parallel
+Node E runs after its dependencies complete
+```
 
 This enables:
 
@@ -246,20 +134,91 @@ This enables:
 - AI processing chains
 - Distributed execution possibilities
 
+> See `Nodes.cnr` for retries, dependency chains, and failure/skip propagation.
+
 ---
 
-# Future Compiler Improvements
+## Networking / Web
 
-Planned:
+CnR currently supports:
 
+- Raw socket support
+- An HTTP client: `Http.GET/POST/PUT/PATCH/DELETE(url) { header { ... } body { ... } }`
+- A full HTTP server: `Server() { host = ...; port = ...; }`, route declarations (`server.GET("/path") { ... }`), and `server.start()`
+- Rich `request` / `response` objects inside route handlers — `request.params`, `.query`, `.header`, `.cookie`, `.body`, `.json`, and `response.status`, `.header()`, `.cookie()`, `.redirect()`
+
+> See `HttpClient.cnr` for making outbound HTTP requests, and `Http.cnr` for running an HTTP server with routes.
+
+**Planned web ecosystem:** HTML/template integration, native backend development tooling, and an integrated web stack.
+
+---
+
+## Runtime in C++
+
+CnR is powered by a C++ runtime responsible for actually executing the language. The runtime handles:
+
+- Internal execution (lexing, parsing, interpreting)
+- Performance-critical operations
+- Native integrations
+- System communication (sockets, threads, I/O)
+
+The objective is to keep CnR's syntax simple on the surface while relying on C++ performance underneath.
+
+---
+
+## Future Features
+
+The sections below are **planned, not yet implemented** — grouped by the same categories as the current features above, so it's easy to see where each area is headed.
+
+### Variables & Language Core
 - Bytecode generation
 - JIT compilation
-- Native optimization
-- Improved execution engine
+- Native optimization & an improved execution engine
+
+### Native Threading
+- Locks, mutable & shared state primitives
+- Full thread lifecycle management
+- Runtime-controlled scheduling
+
+### Networking / Web
+- HTML/template integration
+- Native backend development tooling
+- A fully integrated web stack
+
+### Native Database System
+- A custom `.cnrdb` database format
+- Database syntax built directly into the language
+- Tables, records, and persistence
+- A C++-powered database engine
+
+### MathLib Integration
+
+The existing C++ MathLib will be integrated directly into CnR, planned to include:
+
+| Area | Planned Capabilities |
+|---|---|
+| **Algebra** | Algebraic operations, expression manipulation, polynomial operations |
+| **Linear Algebra** | Vectors, matrices, tensors |
+| **Calculus** | Derivatives, integrals, limits |
+| **Statistics** | Statistical functions, numerical analysis |
+| **Optimization** | Optimization algorithms, numerical solvers |
+| **Polynomial Mathematics** | Polynomial manipulation, root calculation, Durand-Kerner method, advanced numerical methods |
+| **Symbolic Mathematics** | Symbolic expressions and transformations, built on the parser's AST |
+
+### Native Neural Network System
+- Tensor operations & matrix calculations
+- Automatic differentiation
+- Backpropagation & gradient computation
+- Optimization algorithms
+- Neural network models defined directly in native CnR syntax
+
+### DAG Execution System
+- Richer workflow tracking & observability
+- Passing results between dependent nodes
 
 ---
 
-# Vision
+## Vision
 
 CnR aims to become a programming language where:
 
@@ -270,5 +229,8 @@ CnR aims to become a programming language where:
 - Databases are part of the language.
 - Performance comes from the C++ runtime.
 
-**CnR - Compile N Run**
+<div align="center">
 
+**CnR — Compile N Run**
+
+</div>

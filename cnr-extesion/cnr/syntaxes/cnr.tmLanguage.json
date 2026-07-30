@@ -35,6 +35,12 @@
       "include": "#request-response"
     },
     {
+      "include": "#nodes-workflow"
+    },
+    {
+      "include": "#error-handling"
+    },
+    {
       "include": "#functions"
     },
     {
@@ -182,6 +188,62 @@
             "2": { "name": "keyword.operator.cnr" },
             "3": { "name": "support.function.response-method.cnr" }
           }
+        }
+      ]
+    },
+
+
+    "nodes-workflow": {
+      "comment": "Nodes Name { NodeName(dep1, dep2) -> OnFail(Retry = N) { ... Fail(); ... } }",
+      "patterns": [
+        {
+          "name": "keyword.control.nodes.cnr",
+          "match": "\\bNodes\\b"
+        },
+        {
+          "match": "(\\bNodes\\b)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.nodes.cnr" },
+            "2": { "name": "entity.name.type.workflow.cnr" }
+          }
+        },
+        {
+          "name": "keyword.control.onfail.cnr",
+          "match": "\\bOnFail\\b"
+        },
+        {
+          "name": "variable.parameter.retry.cnr",
+          "match": "\\bRetry\\b(?=\\s*=)"
+        },
+        {
+          "name": "keyword.operator.arrow.cnr",
+          "match": "->"
+        },
+        {
+          "name": "support.function.fail.cnr",
+          "match": "\\bFail\\b(?=\\s*\\()"
+        },
+        {
+          "match": "([a-zA-Z_][a-zA-Z0-9_]*)\\s*(\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.node.cnr" },
+            "2": { "name": "punctuation.section.parens.begin.cnr" }
+          }
+        }
+      ]
+    },
+
+
+    "error-handling": {
+      "comment": "try { ... } catch(var e) { ... } and Throw(\"message\");",
+      "patterns": [
+        {
+          "name": "keyword.control.trycatch.cnr",
+          "match": "\\b(try|catch)\\b"
+        },
+        {
+          "name": "support.function.throw.cnr",
+          "match": "\\bThrow\\b(?=\\s*\\()"
         }
       ]
     },

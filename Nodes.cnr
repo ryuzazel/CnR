@@ -1,0 +1,44 @@
+function willFail() {
+    Nodes W {
+        Step1() {
+            try{
+            print("willFail: attempt, will fail!");
+            Fail();
+            print("Nothing here");
+            }catch(var e){
+                print("Error: ");
+                print(e);
+            }
+        };
+        Step2(Step1) {
+            print("Hi i'm Step 2, i'll not print");
+        };
+    }
+}
+
+function willRetry() {
+    var tmp = 0;
+    Nodes W {
+        Step1() -> OnFail(Retry = 3) {
+            tmp = tmp + 1;
+            print("willRetry attempt, tmp =");
+            print(tmp);
+            if(tmp < 3) {
+                Fail();
+            }
+        };
+        Step2(Step1) {
+            print("Hi i'm Step 2");
+        };
+    }
+}
+
+Parallel
+{
+    willFail();
+}
+{
+    willRetry();
+}
+
+print("done");

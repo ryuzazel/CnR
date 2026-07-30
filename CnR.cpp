@@ -15,6 +15,8 @@ enum class TokType {
     Function, Return, StructKw,
     Parallel, ThreadKw, JoinKw, JoinAllKw,
     HttpKw, HeaderKw, BodyKw,
+    NodesKw, OnFailKw, RetryKw, FailKw,
+    TryKw, CatchKw, ThrowKw,
     Plus, Minus, Star, Slash, Percent,
     Assign,
     EqualEqual, BangEqual, Less, LessEqual, Greater, GreaterEqual,
@@ -86,6 +88,13 @@ struct Lexer {
         if (s == "Http") return {TokType::HttpKw,s,0,startLine};
         if (s == "header") return {TokType::HeaderKw,s,0,startLine};
         if (s == "body") return {TokType::BodyKw,s,0,startLine};
+        if (s == "Nodes") return {TokType::NodesKw,s,0,startLine};
+        if (s == "OnFail") return {TokType::OnFailKw,s,0,startLine};
+        if (s == "Retry") return {TokType::RetryKw,s,0,startLine};
+        if (s == "Fail") return {TokType::FailKw,s,0,startLine};
+        if (s == "try") return {TokType::TryKw,s,0,startLine};
+        if (s == "catch") return {TokType::CatchKw,s,0,startLine};
+        if (s == "Throw") return {TokType::ThrowKw,s,0,startLine};
         return {TokType::Ident,s,0,startLine};
     }
     Token number() {
@@ -227,6 +236,58 @@ struct ForStmt : Stmt { StmtPtr init; ExprPtr condition; StmtPtr increment; std:
 struct ReturnStmt : Stmt { ExprPtr value; };
 struct ExprStmt : Stmt { ExprPtr expr; };
 struct ParallelStmt : Stmt { std::vector<std::shared_ptr<BlockStmt>> blocks; };
+
+// --- DAG / Nodes workflow ---
+
+// Fail(); -- only meaningful inside a Nodes{} node body. Aborts the current
+// attempt of the enclosing node (counts as a failed attempt; retried if the
+// node's OnFail(Retry=N) budget allows).
+struct FailExpr : Expr {};
+
+// One node inside a `Nodes Name { ... }` statement:
+//   NodeName(dep1, dep2, ...) -> OnFail(Retry = N) { body }
+// `dependsOn` holds the names of sibling nodes (within the same Nodes
+// statement) that must succeed before this node is eligible to run.
+// `maxRetries` defaults to 0 (no OnFail clause = fail is final immediately).
+struct NodeDecl {
+    std::string name;
+    std::vector<std::string> dependsOn;
+    int maxRetries = 0;
+    std::shared_ptr<BlockStmt> body;
+};
+
+// `Nodes MyWorkflow { NodeDecl* }` -- a statement (not a declaration): when
+// execution reaches it, the whole DAG runs to completion (nodes at the same
+// dependency depth run concurrently as threads) before the next statement
+// after the Nodes block executes. `workflowName` is a label only (used in
+// error messages), not a callable identifier.
+struct NodesStmt : Stmt {
+    std::string workflowName;
+    std::vector<NodeDecl> nodes;
+};
+
+// Throw("message"); -- raises a catchable runtime error carrying a string
+// message. Distinct from Fail(), which stays specific to Nodes{} node
+// bodies and always marks the enclosing node attempt as failed even when
+// caught by a try/catch inside that same body.
+struct ThrowExpr : Expr { ExprPtr messageExpr; };
+
+// try { ... } catch(var e) { ... } -- generic exception handling. Catches:
+//   - Throw("msg") raised anywhere inside the try block
+//   - ordinary runtime errors (std::runtime_error) raised inside the try block
+//   - Fail() raised inside the try block (the catch body still runs, but
+//     Fail() additionally marks the enclosing Nodes node attempt as failed
+//     for retry purposes -- see CnrThrowSignal/NodeFailSignal handling in
+//     the interpreter)
+// Does NOT catch ReturnSignal (a `return;` inside try still returns from
+// the enclosing function normally).
+// `catchVarName` is always present syntactically (catch(var e)) and is
+// bound to the error message as a string inside catchBlock.
+struct TryCatchStmt : Stmt {
+    std::shared_ptr<BlockStmt> tryBlock;
+    std::string catchVarName;
+    std::shared_ptr<BlockStmt> catchBlock;
+};
 
 // --- HTTP server AST ---
 
@@ -587,6 +648,18 @@ struct Parser {
             expect(TokType::RParen,")");
             return std::make_shared<LenExpr>(id.text);
         }
+        if(match(TokType::FailKw)) {
+            expect(TokType::LParen,"(");
+            expect(TokType::RParen,")");
+            return std::make_shared<FailExpr>();
+        }
+        if(match(TokType::ThrowKw)) {
+            expect(TokType::LParen,"(");
+            auto t = std::make_shared<ThrowExpr>();
+            t->messageExpr = parseExpression();
+            expect(TokType::RParen,")");
+            return t;
+        }
         if(check(TokType::Ident) && peek().text == "Server" && peek(1).type == TokType::LParen) {
             advance(); // Server
             advance(); // (
@@ -941,6 +1014,72 @@ struct Parser {
         return stmt;
     }
 
+    NodeDecl parseNodeDecl() {
+        NodeDecl node;
+        node.name = expect(TokType::Ident,"node name").text;
+        expect(TokType::LParen,"(");
+        if(!check(TokType::RParen)) {
+            while(true) {
+                node.dependsOn.push_back(expect(TokType::Ident,"dependency node name").text);
+                if(match(TokType::Comma)) continue;
+                break;
+            }
+        }
+        expect(TokType::RParen,")");
+        if(match(TokType::Minus)) {
+            // matched '-' of '->'; consume the '>' greedily since the lexer
+            // tokenizes '-' and '>' separately (no dedicated Arrow token)
+            expect(TokType::Greater,">");
+            expect(TokType::OnFailKw,"OnFail");
+            expect(TokType::LParen,"(");
+            expect(TokType::RetryKw,"Retry");
+            expect(TokType::Assign,"=");
+            auto n = expect(TokType::Number,"retry count");
+            node.maxRetries = (int)n.number;
+            expect(TokType::RParen,")");
+        }
+        node.body = parseBlock();
+        return node;
+    }
+
+    StmtPtr parseNodes() {
+        expect(TokType::NodesKw,"Nodes");
+        auto stmt = std::make_shared<NodesStmt>();
+        stmt->workflowName = expect(TokType::Ident,"workflow name").text;
+        expect(TokType::LBrace,"{");
+        while(!check(TokType::RBrace)) {
+            if(check(TokType::End))
+                throw std::runtime_error("Unexpected end of file inside Nodes '" + stmt->workflowName + "'");
+            stmt->nodes.push_back(parseNodeDecl());
+            match(TokType::Semicolon); // trailing ';' after a node block is optional but tolerated
+        }
+        expect(TokType::RBrace,"}");
+        // Validate dependency names refer to nodes declared in this same workflow.
+        for(auto& n : stmt->nodes) {
+            for(auto& dep : n.dependsOn) {
+                bool found = false;
+                for(auto& other : stmt->nodes) if(other.name == dep) { found = true; break; }
+                if(!found)
+                    throw std::runtime_error("Nodes '" + stmt->workflowName + "': node '" + n.name +
+                                              "' depends on undeclared node '" + dep + "'");
+            }
+        }
+        return stmt;
+    }
+
+    StmtPtr parseTryCatch() {
+        expect(TokType::TryKw,"try");
+        auto stmt = std::make_shared<TryCatchStmt>();
+        stmt->tryBlock = parseBlock();
+        expect(TokType::CatchKw,"catch");
+        expect(TokType::LParen,"(");
+        expect(TokType::Var,"'var' before catch variable name");
+        stmt->catchVarName = expect(TokType::Ident,"catch variable name").text;
+        expect(TokType::RParen,")");
+        stmt->catchBlock = parseBlock();
+        return stmt;
+    }
+
     StmtPtr parseStatement() {
         if(check(TokType::Var)) return parseVarDecl();
         if(check(TokType::Print)) return parsePrint();
@@ -949,6 +1088,20 @@ struct Parser {
         if(check(TokType::For)) return parseFor();
         if(check(TokType::Return)) return parseReturn();
         if(check(TokType::Parallel)) return parseParallel();
+        if(check(TokType::NodesKw)) return parseNodes();
+        if(check(TokType::TryKw)) return parseTryCatch();
+        if(check(TokType::FailKw)) {
+            auto stmt = std::make_shared<ExprStmt>();
+            stmt->expr = parseExpression();
+            expect(TokType::Semicolon,";");
+            return stmt;
+        }
+        if(check(TokType::ThrowKw)) {
+            auto stmt = std::make_shared<ExprStmt>();
+            stmt->expr = parseExpression();
+            expect(TokType::Semicolon,";");
+            return stmt;
+        }
         if(check(TokType::Ident)) return parseAssignmentStatement();
         throw std::runtime_error("Unexpected statement on line " + std::to_string(peek().line));
     }
@@ -1073,6 +1226,17 @@ std::string valueToDisplayString(const Value& v) {
 }
 
 struct ReturnSignal { Value value; };
+
+// Thrown by Fail() to abort the current attempt of the enclosing Nodes{}
+// node body. Caught by the per-node retry loop in runNodesWorkflow(); if
+// Fail() is somehow reached outside a node body, it propagates up like any
+// other uncaught error (reported as "Fail() called outside of a Nodes node").
+struct NodeFailSignal {};
+
+// Thrown by Throw("msg"). Carries a string message, caught by the nearest
+// enclosing try/catch (see TryCatchStmt execution). Unlike NodeFailSignal,
+// catching this has no special side effect on Nodes{} retry bookkeeping.
+struct CnrThrowSignal { std::string message; };
 
 #include <thread>
 #include <mutex>
@@ -1865,6 +2029,15 @@ public:
     Value* currentSelf = nullptr;
     ServerResponseState* currentResponseState = nullptr; // set while executing a route body
 
+    // Set to true whenever a Fail() is caught by a try/catch (see execute()'s
+    // TryCatchStmt case). Unlike a generic Throw()/runtime error, catching
+    // Fail() must still mark the enclosing Nodes{} node attempt as failed for
+    // retry purposes -- this flag is how that side effect survives being
+    // caught. Checked (and cleared) by runNodeWithRetries() after each
+    // attempt completes, whether the attempt's top-level exception was caught
+    // there or bubbled all the way up.
+    bool pendingNodeFailFromCatch = false;
+
     std::shared_ptr<std::vector<std::shared_ptr<ThreadRecord>>> threadRegistry =
         std::make_shared<std::vector<std::shared_ptr<ThreadRecord>>>();
     std::shared_ptr<std::mutex> registryMtx = std::make_shared<std::mutex>();
@@ -2062,6 +2235,11 @@ Value evalToValue(const ExprPtr& expr) {
         return v;
     }
     if(auto omc = std::dynamic_pointer_cast<ObjectMethodCallExpr>(expr)) return callObjectMethod(omc);
+    if(std::dynamic_pointer_cast<FailExpr>(expr)) throw NodeFailSignal{};
+    if(auto th = std::dynamic_pointer_cast<ThrowExpr>(expr)) {
+        std::string msg = valueToDisplayString(evalToValue(th->messageExpr));
+        throw CnrThrowSignal{msg};
+    }
     if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
         Value& val = resolveVar(v->name);
         return val;
@@ -2668,8 +2846,161 @@ void runServerLoop(std::shared_ptr<ServerInstance> server) {
     close(listenFd);
 }
 
+enum class NodeStatus { Pending, Success, Failed, Skipped };
+
+// Runs one node's body up to (maxRetries + 1) times. Fail() inside the body
+// aborts that attempt (caught as NodeFailSignal) and counts as a failed
+// attempt; any other uncaught exception is also treated as a failed attempt
+// (so a runtime error inside a node doesn't crash the whole workflow thread --
+// it's just recorded as that node failing, same as an explicit Fail()).
+// Returns true if the node ultimately succeeded.
+bool runNodeWithRetries(const NodeDecl& node, std::string& outErrorMsg) {
+    int attempts = node.maxRetries + 1;
+    for(int attempt = 0; attempt < attempts; ++attempt) {
+        // Fresh scope per attempt (and per node): matches function-call
+        // scoping semantics -- locals declared with `var` inside the node
+        // body don't leak into sibling nodes or outer code, but reads/writes
+        // of names not declared locally fall through to outer/global scopes
+        // via the normal scope-chain lookup in lookupVar/resolveVar.
+        scopes.push_back({});
+        pendingNodeFailFromCatch = false;
+        try {
+            executeBlock(node.body);
+            scopes.pop_back();
+            if(pendingNodeFailFromCatch) {
+                // Fail() was raised and caught by a try/catch inside the body
+                // (so the body ran to completion normally), but Fail() still
+                // marks this attempt as failed for retry purposes.
+                pendingNodeFailFromCatch = false;
+                outErrorMsg = "Fail() called (caught internally)";
+                continue;
+            }
+            return true;
+        } catch(NodeFailSignal&) {
+            scopes.pop_back();
+            outErrorMsg = "Fail() called";
+        } catch(ReturnSignal&) {
+            // A bare `return;` inside a node body ends that attempt successfully
+            // without propagating out of the workflow (Nodes bodies aren't functions).
+            scopes.pop_back();
+            return true;
+        } catch(CnrThrowSignal& t) {
+            scopes.pop_back();
+            outErrorMsg = t.message;
+        } catch(const std::exception& e) {
+            scopes.pop_back();
+            outErrorMsg = e.what();
+        } catch(...) {
+            scopes.pop_back();
+            outErrorMsg = "unknown error in node";
+        }
+    }
+    return false;
+}
+
+// Executes a whole `Nodes Name { ... }` statement to completion: computes
+// dependency waves, runs each wave's nodes concurrently as threads (sharing
+// this Interpreter's live scope stack for outer-variable access -- no
+// synchronization beyond what Parallel{} already provides, by design), and
+// skips any node whose dependencies didn't all succeed.
+void runNodesWorkflow(const std::shared_ptr<NodesStmt>& s) {
+    std::unordered_map<std::string, NodeStatus> status;
+    std::unordered_map<std::string, std::string> errorMsgs;
+    for(auto& n : s->nodes) status[n.name] = NodeStatus::Pending;
+
+    std::mutex statusMtx;
+
+    // Compute dependency waves via repeated topological "ready" passes.
+    // Cycle detection: if a full pass makes no progress, remaining nodes
+    // form a cycle (or depend on one), which is a program error.
+    std::vector<std::vector<const NodeDecl*>> waves;
+    std::vector<const NodeDecl*> remaining;
+    for(auto& n : s->nodes) remaining.push_back(&n);
+
+    while(!remaining.empty()) {
+        std::vector<const NodeDecl*> ready;
+        std::vector<const NodeDecl*> stillRemaining;
+        for(auto* n : remaining) {
+            bool allDepsScheduled = true;
+            for(auto& dep : n->dependsOn) {
+                bool scheduled = false;
+                for(auto& wave : waves) for(auto* wn : wave) if(wn->name == dep) scheduled = true;
+                if(!scheduled) { allDepsScheduled = false; break; }
+            }
+            if(allDepsScheduled) ready.push_back(n);
+            else stillRemaining.push_back(n);
+        }
+        if(ready.empty())
+            throw std::runtime_error("Nodes '" + s->workflowName + "': circular dependency detected among remaining nodes");
+        waves.push_back(ready);
+        remaining = stillRemaining;
+    }
+
+    for(auto& wave : waves) {
+        std::vector<std::thread> workers;
+        for(auto* nodePtr : wave) {
+            const NodeDecl& node = *nodePtr;
+
+            // Determine eligibility up front (dependency success check),
+            // outside the thread, so Skipped nodes don't spawn a thread at all.
+            bool eligible = true;
+            for(auto& dep : node.dependsOn) {
+                std::lock_guard<std::mutex> lock(statusMtx);
+                if(status[dep] != NodeStatus::Success) { eligible = false; break; }
+            }
+            if(!eligible) {
+                std::lock_guard<std::mutex> lock(statusMtx);
+                status[node.name] = NodeStatus::Skipped;
+                continue;
+            }
+
+            workers.emplace_back([this, &node, &status, &statusMtx, &errorMsgs]() {
+                std::string errMsg;
+                bool ok = runNodeWithRetries(node, errMsg);
+                std::lock_guard<std::mutex> lock(statusMtx);
+                status[node.name] = ok ? NodeStatus::Success : NodeStatus::Failed;
+                if(!ok) errorMsgs[node.name] = errMsg;
+            });
+        }
+        for(auto& w : workers) w.join();
+    }
+}
+
 void execute(const StmtPtr& stmt)
 {
+    if(auto s = std::dynamic_pointer_cast<TryCatchStmt>(stmt)) {
+        // ReturnSignal is intentionally NOT caught here -- `return;` inside a
+        // try block still returns from the enclosing function normally.
+        try {
+            executeBlock(s->tryBlock);
+        } catch(ReturnSignal&) {
+            throw;
+        } catch(NodeFailSignal&) {
+            // Fail() caught by a try/catch inside a Nodes node body: run the
+            // catch block as normal, but remember that Fail() happened so the
+            // enclosing node attempt still gets marked failed for retries.
+            pendingNodeFailFromCatch = true;
+            scopes.push_back({});
+            scopes.back()[s->catchVarName] = Value::makeString("Fail() called");
+            executeBlock(s->catchBlock);
+            scopes.pop_back();
+        } catch(CnrThrowSignal& t) {
+            scopes.push_back({});
+            scopes.back()[s->catchVarName] = Value::makeString(t.message);
+            executeBlock(s->catchBlock);
+            scopes.pop_back();
+        } catch(const std::exception& e) {
+            scopes.push_back({});
+            scopes.back()[s->catchVarName] = Value::makeString(e.what());
+            executeBlock(s->catchBlock);
+            scopes.pop_back();
+        }
+        return;
+    }
+    if(auto s = std::dynamic_pointer_cast<NodesStmt>(stmt)) {
+        runNodesWorkflow(s);
+        return;
+    }
     if(auto s = std::dynamic_pointer_cast<ParallelStmt>(stmt)) {
         auto functionsCopy = functions;
         auto structsCopy = structs;

@@ -1,0 +1,21 @@
+try {
+    var x = 1 / 0;
+} catch(var e) {
+    print("caught:");
+    print(e);
+}
+
+var[] arr = {1,2,3};
+try {
+    print(arr[99]);
+} catch(var e) {
+    print("caught:");
+    print(e);
+}
+
+try {
+    Throw("something went wrong");
+} catch(var e) {
+    print("caught:");
+    print(e);
+}
