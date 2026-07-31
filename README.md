@@ -64,6 +64,14 @@ CnR currently supports:
 
 **Planned improvements:** more advanced function systems, better function composition, and additional language abstractions.
 
+### Native Database System
+
+CnR currently supports:
+
+- A custom `.cnrdb` database format
+- Database syntax built directly into the language
+- Tables, records, and persistence
+
 ### Arrays
 
 CnR currently supports dynamic, numeric arrays with built-in methods:
@@ -185,11 +193,6 @@ The sections below are **planned, not yet implemented** — grouped by the same 
 - Native backend development tooling
 - A fully integrated web stack
 
-### Native Database System
-- A custom `.cnrdb` database format
-- Database syntax built directly into the language
-- Tables, records, and persistence
-- A C++-powered database engine
 
 ### MathLib Integration
 

@@ -1,0 +1,110 @@
+// write_login.cnr
+// Sets up a small "accounts" database for a login system and exercises
+// every table method the Data feature provides. Run this once, then run
+// read_login.cnr to log in against the data it creates.
+//
+// Design notes:
+//  - username/password are stored as var[] (char-code arrays), not plain
+//    string fields. "==" now compares arrays element-by-element natively,
+//    so read_login.cnr checks passwords with a plain "!=" on the arrays.
+
+Data LoginDB("logindb"){
+    Struct Account{
+        var id;
+        var username[];
+        var password[];
+        var email;
+        var loginCount;
+        var active;
+
+        Account(var i, var u, var p, var e){
+            id = i;
+            var idx = 0;
+            while(idx < len(u)){ username.push(u[idx]); idx = idx + 1; }
+            idx = 0;
+            while(idx < len(p)){ password.push(p[idx]); idx = idx + 1; }
+            email = e;
+            loginCount = 0;
+            active = true;
+        }
+    }
+    table Account accounts primaryKey id;
+}
+
+// ---- push(): register accounts -------------------------------------------
+var[] u1 = "bob";
+var[] p1 = "secret1";
+var[] u2 = "alice";
+var[] p2 = "hunter2";
+var[] u3 = "temp";
+var[] p3 = "deleteme";
+
+LoginDB.accounts.push(1, u1, p1, "bob@example.com");
+LoginDB.accounts.push(2, u2, p2, "alice@example.com");
+LoginDB.accounts.push(3, u3, p3, "temp@example.com");
+
+print("count() after push:");
+print(LoginDB.accounts.count());
+
+// ---- find(): substring search across all fields ---------------------------
+var foundBySubstring = LoginDB.accounts.find("alice@example.com");
+print("find() matched index:");
+print(foundBySubstring[0]);
+
+// ---- findWhere(): exact match on one field ---------------------------------
+var whereMatch = LoginDB.accounts.findWhere("email", "bob@example.com");
+print("findWhere() matched index:");
+print(whereMatch[0]);
+
+// ---- get() / getById(): read a full record back ----------------------------
+var bobById = LoginDB.accounts.getById(1);
+print("account 1 email via getById():");
+print(bobById.email);
+
+var bobByIndex = LoginDB.accounts.get(whereMatch[0]);
+print("account 1 email via get():");
+print(bobByIndex.email);
+
+// ---- insert(): set a single field by row index ------------------------------
+LoginDB.accounts.insert(whereMatch[0], "loginCount", 5);
+print("loginCount after insert():");
+print(LoginDB.accounts.getById(1).loginCount);
+
+// ---- updateById(): update one field for one record --------------------------
+LoginDB.accounts.updateById(1, "email", "bobby@example.com");
+print("email after updateById():");
+print(LoginDB.accounts.getById(1).email);
+
+// ---- updateWhere(): bulk update every matching record ------------------------
+var resetCount = LoginDB.accounts.updateWhere("active", true, "loginCount", 0);
+print("updateWhere() reset loginCount on this many accounts:");
+print(resetCount);
+
+// ---- orderBy(): get row indices sorted by a field ----------------------------
+var byEmail = LoginDB.accounts.orderBy("email", "asc");
+print("orderBy() returned this many rows:");
+print(len(byEmail));
+
+// ---- deleteWhere(): remove every matching record -----------------------------
+var deletedCount = LoginDB.accounts.deleteWhere("email", "temp@example.com");
+print("deleteWhere() removed:");
+print(deletedCount);
+print("count() after deleteWhere():");
+print(LoginDB.accounts.count());
+
+// ---- delete() / deleteById(): remove a single record -------------------------
+// (add then immediately remove a scratch row, just to exercise both calls)
+LoginDB.accounts.push(4, u3, p3, "scratch@example.com");
+LoginDB.accounts.deleteById(4);
+print("count() after deleteById() cleanup:");
+print(LoginDB.accounts.count());
+
+// ---- save(): persist to disk --------------------------------------------------
+LoginDB.accounts.save();
+
+// ---- encode(): encrypt the whole database file at rest -------------------------
+// read_login.cnr must call encode() with this exact same key before it can
+// read anything, since the file is now AES-256 encrypted on disk.
+LoginDB.encode("master-key-42");
+
+print("Database written and encrypted. Ready for read_login.cnr.");

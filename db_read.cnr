@@ -1,0 +1,121 @@
+// read_login.cnr
+// Loads the database created by write_login.cnr and performs several login
+// attempts against it, exercising the rest of the Data/table method set.
+
+function printCharArray(var arr){
+    var i = 0;
+    while(i < len(arr)){
+        print((char)arr[i]);
+        i = i + 1;
+    }
+    print("");
+}
+
+// login(email, password) -- looks the account up by email with findWhere(),
+// reads the full row with get(), and compares the password array directly
+// with "!=" (arrays now compare element-by-element natively). On success it
+// bumps loginCount with updateById() and prints the account back out; on
+// failure it reports why.
+function login(var email, var attemptPassword){
+    var matches = LoginDB.accounts.findWhere("email", email);
+    if(len(matches) == 0){
+        print("Login failed: no account with that email.");
+        return false;
+    }
+
+    var idx = matches[0];
+    var account = LoginDB.accounts.get(idx);
+
+    if(attemptPassword != account.password){
+        print("Login failed: wrong password.");
+        return false;
+    }
+
+    LoginDB.accounts.updateById(account.id, "loginCount", account.loginCount + 1);
+    var refreshed = LoginDB.accounts.getById(account.id);
+
+    print("Login successful. Welcome back,");
+    printCharArray(refreshed.username);
+    print("Email:");
+    print(refreshed.email);
+    print("Total logins:");
+    print(refreshed.loginCount);
+    return true;
+}
+
+Data LoginDB("logindb"){
+    Struct Account{
+        var id;
+        var username[];
+        var password[];
+        var email;
+        var loginCount;
+        var active;
+
+        Account(var i, var u, var p, var e){
+            id = i;
+            var idx = 0;
+            while(idx < len(u)){ username.push(u[idx]); idx = idx + 1; }
+            idx = 0;
+            while(idx < len(p)){ password.push(p[idx]); idx = idx + 1; }
+            email = e;
+            loginCount = 0;
+            active = true;
+        }
+    }
+    table Account accounts primaryKey id;
+}
+
+// ---- encode(): must use the SAME key write_login.cnr used, since that's
+// what decrypts the file and loads its contents into memory.
+LoginDB.encode("master-key-42");
+
+// ---- load(): explicit reload (redundant right after encode(), shown for
+// completeness -- useful if you want to refresh mid-run after another
+// process wrote to the file).
+LoginDB.accounts.load();
+
+print("count() after load():");
+print(LoginDB.accounts.count());
+
+// ---- three login attempts -------------------------------------------------
+print("--- attempt 1: correct credentials ---");
+var[] tryPass1 = "hunter2";
+login("alice@example.com", tryPass1);
+
+print("--- attempt 2: wrong password ---");
+var[] tryPass2 = "wrongpassword";
+login("bobby@example.com", tryPass2);
+
+print("--- attempt 3: unknown email ---");
+var[] tryPass3 = "whatever";
+login("nobody@example.com", tryPass3);
+
+// ---- findById(): confirm a specific id still exists ------------------------
+var idxCheck = LoginDB.accounts.findById(2);
+print("findById(2) row index:");
+print(idxCheck);
+
+// ---- updateWhere(): deactivate every account that hasn't logged in ---------
+var deactivated = LoginDB.accounts.updateWhere("loginCount", 0, "active", false);
+print("updateWhere() deactivated this many accounts:");
+print(deactivated);
+
+// ---- orderBy(): leaderboard of accounts by loginCount, most first ----------
+var ranking = LoginDB.accounts.orderBy("loginCount", "desc");
+print("--- login leaderboard ---");
+var r = 0;
+while(r < len(ranking)){
+    var acc = LoginDB.accounts.get(ranking[r]);
+    print(acc.email);
+    print(acc.loginCount);
+    r = r + 1;
+}
+
+// ---- deleteById(): admin removes a deactivated account ---------------------
+LoginDB.accounts.deleteById(2);
+print("count() after deleteById(2):");
+print(LoginDB.accounts.count());
+
+LoginDB.accounts.save();
+print("Done.");

@@ -35,6 +35,9 @@
       "include": "#request-response"
     },
     {
+      "include": "#database"
+    },
+    {
       "include": "#nodes-workflow"
     },
     {
@@ -193,6 +196,32 @@
     },
 
 
+    "database": {
+      "comment": "Data Name(\"file\"){ Struct ...; table Struct varName [primaryKey field]; } and Data1.table.push()/find()/findWhere()/findById()/get()/getById()/insert()/updateWhere()/updateById()/delete()/deleteWhere()/deleteById()/orderBy()/save()/load()/count()/encode()",
+      "patterns": [
+        {
+          "name": "support.class.database.cnr",
+          "match": "\\bData\\b(?=\\s+[A-Za-z_])"
+        },
+        {
+          "name": "keyword.control.table.cnr",
+          "match": "\\btable\\b"
+        },
+        {
+          "name": "keyword.other.primarykey.cnr",
+          "match": "\\bprimaryKey\\b"
+        },
+        {
+          "match": "(\\.)\\s*(encode|findWhere|findById|getById|get|find|updateWhere|updateById|deleteWhere|deleteById|delete|insert|orderBy|push|save|load|count)\\b(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "keyword.operator.cnr" },
+            "2": { "name": "support.function.database-method.cnr" }
+          }
+        }
+      ]
+    },
+
+
     "nodes-workflow": {
       "comment": "Nodes Name { NodeName(dep1, dep2) -> OnFail(Retry = N) { ... Fail(); ... } }",
       "patterns": [
@@ -316,7 +345,7 @@
       "patterns": [
         {
           "name": "keyword.operator.cnr",
-          "match": "(\\+|-|\\*|/|%|==|!=|<=|>=|<|>|=|&&|\\|\\||\\.)"
+          "match": "(\\+|-|\\*|/|%|==|!=|<=|>=|<|>|=|&&|\\|\\||\\.|:)"
         }
       ]
     },

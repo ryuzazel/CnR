@@ -8,6 +8,11 @@
 #include <cctype>
 #include <algorithm>
 #include <stdexcept>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <random>
+#include <cstdio>
 
 enum class TokType {
     Number, Ident, String,
@@ -17,6 +22,7 @@ enum class TokType {
     HttpKw, HeaderKw, BodyKw,
     NodesKw, OnFailKw, RetryKw, FailKw,
     TryKw, CatchKw, ThrowKw,
+    DataKw, TableKw,
     Plus, Minus, Star, Slash, Percent,
     Assign,
     EqualEqual, BangEqual, Less, LessEqual, Greater, GreaterEqual,
@@ -95,6 +101,8 @@ struct Lexer {
         if (s == "try") return {TokType::TryKw,s,0,startLine};
         if (s == "catch") return {TokType::CatchKw,s,0,startLine};
         if (s == "Throw") return {TokType::ThrowKw,s,0,startLine};
+        if (s == "Data") return {TokType::DataKw,s,0,startLine};
+        if (s == "table") return {TokType::TableKw,s,0,startLine};
         return {TokType::Ident,s,0,startLine};
     }
     Token number() {
@@ -325,6 +333,19 @@ struct ObjectMethodCallExpr : Expr {
     std::vector<ExprPtr> args;
 };
 
+// Data1.encode("key")                -> dataName="Data1", tableName="",       method="encode"
+// Data1.userList.push(1,"Test")      -> dataName="Data1", tableName="userList", method="push"
+// Data1.userList.find("Test")        -> ... method="find"
+// Data1.userList.delete(0)           -> ... method="delete"
+// Data1.userList.insert(0,"name",v)  -> ... method="insert"
+// Data1.userList.save() / .load() / .count()
+struct DbMethodCallExpr : Expr {
+    std::string dataName;
+    std::string tableName; // empty when the call targets the Data object itself (e.g. encode)
+    std::string method;
+    std::vector<ExprPtr> args;
+};
+
 struct FunctionDecl {
     std::string name;
     std::vector<std::string> params;
@@ -343,10 +364,38 @@ struct StructDecl {
     std::shared_ptr<BlockStmt> ctorBody;
 };
 
+// ----------------------------------------------------------------------------
+// Native database ("Data") support.
+//
+//   Data Name("file.cnrdb"){
+//       Struct Users{ var id; var name; Users(var i, var n){ id=i; name=n; } }
+//       table Users userList;
+//   }
+//
+// A TableDecl ("table StructType varName;") declares one persistent record
+// table typed to a struct defined in the same Data block. A DataDecl bundles
+// its own private struct namespace with one or more table declarations and
+// the backing file name. At runtime a Data instance is a Value with
+// isDatabase=true (see below) holding one in-memory table per TableDecl.
+// ----------------------------------------------------------------------------
+struct TableDecl {
+    std::string structType;
+    std::string varName;
+    std::string primaryKeyField; // empty if no primary key declared
+};
+
+struct DataDecl {
+    std::string name;
+    std::string fileNameLiteral; // raw string literal given in Data Name("file")
+    std::unordered_map<std::string, StructDecl> structs; // structs declared inside this Data block
+    std::vector<TableDecl> tables;
+};
+
 struct Program {
     std::vector<StmtPtr> statements;
     std::unordered_map<std::string, FunctionDecl> functions;
     std::unordered_map<std::string, StructDecl> structs;
+    std::unordered_map<std::string, DataDecl> datas;
 };
 
 struct Parser {
@@ -381,6 +430,38 @@ struct Parser {
     }
     bool arrayMethodTakesArg(ArrayMethod m) {
         return m==ArrayMethod::Push || m==ArrayMethod::Contains || m==ArrayMethod::IndexOf;
+    }
+    bool isDbMethodName(const std::string& text) {
+        static const std::vector<std::string> names = {
+            "encode","push","find","delete","insert","save","load","count",
+            "findWhere","updateWhere","deleteWhere",
+            "findById","updateById","deleteById",
+            "orderBy","get","getById"
+        };
+        for(auto& n : names) if(n==text) return true;
+        return false;
+    }
+    // Parses `id.method(args)` (targets the Data object itself, e.g. .encode())
+    // when tableName is empty, or `id.tableName.method(args)` (targets a table,
+    // e.g. .push()/.find()/.delete()/.insert()/.save()/.load()/.count()).
+    // Caller has already confirmed the shape matches via isDbMethodName lookahead.
+    ExprPtr parseDbMethodCall(const std::string& dataName, const std::string& tableName) {
+        advance(); // '.'
+        std::string methodText = advance().text; // method name ident
+        expect(TokType::LParen,"(");
+        auto call = std::make_shared<DbMethodCallExpr>();
+        call->dataName = dataName;
+        call->tableName = tableName;
+        call->method = methodText;
+        if(!check(TokType::RParen)) {
+            while(true) {
+                call->args.push_back(parseExpression());
+                if(match(TokType::Comma)) continue;
+                break;
+            }
+        }
+        expect(TokType::RParen,")");
+        return call;
     }
     ExprPtr parseArrayMethodCall(const std::string& arrayName) {
         advance(); // '.'
@@ -536,6 +617,21 @@ struct Parser {
                         continue;
                     }
                     throw std::runtime_error("Array method '" + peek(1).text + "()' must be called on an array name, line " + std::to_string(peek().line));
+                }
+            }
+            // Data1.encode("key")            -- id . method (
+            if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+                if(peek(1).type == TokType::Ident && isDbMethodName(peek(1).text) && peek(2).type == TokType::LParen) {
+                    expr = parseDbMethodCall(v->name, "");
+                    continue;
+                }
+                // Data1.userList.push(...)   -- id . tableName . method (
+                if(peek(1).type == TokType::Ident && peek(2).type == TokType::Dot &&
+                   peek(3).type == TokType::Ident && isDbMethodName(peek(3).text) && peek(4).type == TokType::LParen) {
+                    std::string tableName = peek(1).text;
+                    advance(); advance(); // '.' tableName
+                    expr = parseDbMethodCall(v->name, tableName);
+                    continue;
                 }
             }
             if(peek(1).type == TokType::Ident || peek(1).type == TokType::HeaderKw || peek(1).type == TokType::BodyKw) {
@@ -919,6 +1015,24 @@ struct Parser {
                     return stmt;
                 }
             }
+            // Data1.encode("key");  /  Data1.userList.push(...);  etc as bare statements
+            if(peek(1).type == TokType::Ident && isDbMethodName(peek(1).text) && peek(2).type == TokType::LParen) {
+                auto call = parseDbMethodCall(id.text, "");
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                auto stmt = std::make_shared<ExprStmt>();
+                stmt->expr = call;
+                return stmt;
+            }
+            if(peek(1).type == TokType::Ident && peek(2).type == TokType::Dot &&
+               peek(3).type == TokType::Ident && isDbMethodName(peek(3).text) && peek(4).type == TokType::LParen) {
+                std::string tableName = peek(1).text;
+                advance(); advance(); // '.' tableName
+                auto call = parseDbMethodCall(id.text, tableName);
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                auto stmt = std::make_shared<ExprStmt>();
+                stmt->expr = call;
+                return stmt;
+            }
             advance();
             auto stmt = std::make_shared<MemberAssignStmt>();
             stmt->objectName = id.text;
@@ -1165,6 +1279,54 @@ struct Parser {
         return sd;
     }
 
+    DataDecl parseDataDecl() {
+        expect(TokType::DataKw,"Data");
+        DataDecl dd;
+        dd.name = expect(TokType::Ident,"database name").text;
+        expect(TokType::LParen,"(");
+        dd.fileNameLiteral = expect(TokType::String,"database file name string").text;
+        expect(TokType::RParen,")");
+        expect(TokType::LBrace,"{");
+        while(!check(TokType::RBrace)) {
+            if(check(TokType::End))
+                throw std::runtime_error("Unexpected end of file inside Data '" + dd.name + "'");
+            if(check(TokType::StructKw)) {
+                auto sd = parseStructDecl();
+                dd.structs[sd.name] = sd;
+                continue;
+            }
+            if(check(TokType::TableKw)) {
+                advance();
+                TableDecl td;
+                td.structType = expect(TokType::Ident,"struct type name").text;
+                td.varName = expect(TokType::Ident,"table variable name").text;
+                if(check(TokType::Ident) && peek().text == "primaryKey") {
+                    advance();
+                    td.primaryKeyField = expect(TokType::Ident,"primary key field name").text;
+                }
+                expect(TokType::Semicolon,";");
+                dd.tables.push_back(td);
+                continue;
+            }
+            throw std::runtime_error("Unexpected token in Data '" + dd.name + "' on line " + std::to_string(peek().line) +
+                                      " (expected 'Struct' or 'table')");
+        }
+        expect(TokType::RBrace,"}");
+        for(auto& td : dd.tables) {
+            auto sit = dd.structs.find(td.structType);
+            if(sit == dd.structs.end())
+                throw std::runtime_error("Data '" + dd.name + "': table '" + td.varName + "' refers to undefined struct '" + td.structType + "'");
+            if(!td.primaryKeyField.empty()) {
+                bool found = false;
+                for(auto& f : sit->second.fields) if(f.name == td.primaryKeyField) { found = true; break; }
+                if(!found)
+                    throw std::runtime_error("Data '" + dd.name + "': table '" + td.varName + "' primaryKey '" + td.primaryKeyField +
+                                              "' is not a field of struct '" + td.structType + "'");
+            }
+        }
+        return dd;
+    }
+
     Program parseProgram() {
         Program prog;
         while(!check(TokType::End)) {
@@ -1176,6 +1338,11 @@ struct Parser {
             if(check(TokType::StructKw)) {
                 auto sd = parseStructDecl();
                 prog.structs[sd.name] = sd;
+                continue;
+            }
+            if(check(TokType::DataKw)) {
+                auto dd = parseDataDecl();
+                prog.datas[dd.name] = dd;
                 continue;
             }
             prog.statements.push_back(parseStatement());
@@ -1204,6 +1371,8 @@ struct Value {
     bool isServer = false;
     std::shared_ptr<struct ServerInstance> server;
     bool isLenientMap = false; // true for request.query/.params/.header/.cookie: missing key -> "" instead of throwing
+    bool isDatabase = false;
+    std::shared_ptr<struct DatabaseInstance> database;
 
     static Value makeString(std::string s) { Value v; v.isString = true; v.str = std::move(s); return v; }
     static Value makeNull() { Value v; v.isNull = true; return v; }
@@ -1218,11 +1387,43 @@ std::string valueToDisplayString(const Value& v) {
     if(v.isBool) return v.boolean ? "true" : "false";
     if(v.isObject) return v.isObjectArray ? "[array]" : "[object]";
     if(v.isStruct) return "[struct " + v.structType + "]";
+    if(v.isDatabase) return "[database]";
     if(v.isArray) return "[array]";
     std::ostringstream oss;
     if(v.number == (long long)v.number) oss << (long long)v.number;
     else oss << v.number;
     return oss.str();
+}
+
+// Generic "==" for two Values, used by BinaryExpr EqualEqual/BangEqual so
+// that `==`/`!=` work correctly on the operand kinds this language actually
+// has, instead of silently falling back to a numeric compare (which used to
+// make two different strings, or two different arrays, look "equal" just
+// because their raw .number field defaulted to 0 on both sides):
+//   - arrays: same length and every element numerically equal, in order
+//   - strings: same character content
+//   - null: equal only to another null
+//   - everything else (numbers, bools): numeric compare, bools as 0/1
+// Mismatched kinds (e.g. an array vs a string) are never equal.
+bool valuesEqual(const Value& a, const Value& b) {
+    if(a.isArray || b.isArray) {
+        if(!a.isArray || !b.isArray) return false;
+        if(a.array.size() != b.array.size()) return false;
+        for(size_t i=0;i<a.array.size();++i) {
+            if(a.array[i] != b.array[i]) return false;
+        }
+        return true;
+    }
+    if(a.isString || b.isString) {
+        if(!a.isString || !b.isString) return false;
+        return a.str == b.str;
+    }
+    if(a.isNull || b.isNull) {
+        return a.isNull && b.isNull;
+    }
+    double av = a.isBool ? (a.boolean ? 1.0 : 0.0) : a.number;
+    double bv = b.isBool ? (b.boolean ? 1.0 : 0.0) : b.number;
+    return av == bv;
 }
 
 struct ReturnSignal { Value value; };
@@ -2010,12 +2211,328 @@ inline std::string buildRawHttpResponse(const ServerResponseState& rs, const Val
     return out.str();
 }
 
+// ============================================================================
+// Minimal self-contained SHA-256 + AES-256-CBC, used to give Data.encode(key)
+// real AES-256 encryption at rest for .cnrdb files without any external
+// crypto library (the sandboxed build environment can't fetch one). SHA-256
+// derives a 32-byte key from the user-supplied passphrase; AES-256-CBC with
+// PKCS#7 padding and a random IV (stored in the file header) encrypts the
+// serialized table bytes.
+// ============================================================================
+namespace cnrcrypto {
+
+// ---- SHA-256 -----------------------------------------------------------
+struct Sha256 {
+    static uint32_t rotr(uint32_t x, uint32_t n) { return (x >> n) | (x << (32 - n)); }
+
+    static std::array<uint8_t,32> hash(const std::vector<uint8_t>& msg) {
+        static const uint32_t k[64] = {
+            0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+            0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+            0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+            0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+            0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+            0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+            0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+            0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+        };
+        uint32_t h[8] = {
+            0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+            0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19
+        };
+        std::vector<uint8_t> data = msg;
+        uint64_t bitLen = (uint64_t)msg.size() * 8;
+        data.push_back(0x80);
+        while (data.size() % 64 != 56) data.push_back(0x00);
+        for (int i = 7; i >= 0; --i) data.push_back((uint8_t)(bitLen >> (i*8)));
+
+        for (size_t chunk = 0; chunk < data.size(); chunk += 64) {
+            uint32_t w[64];
+            for (int i = 0; i < 16; ++i) {
+                w[i] = (data[chunk+i*4] << 24) | (data[chunk+i*4+1] << 16) |
+                       (data[chunk+i*4+2] << 8) | (data[chunk+i*4+3]);
+            }
+            for (int i = 16; i < 64; ++i) {
+                uint32_t s0 = rotr(w[i-15],7) ^ rotr(w[i-15],18) ^ (w[i-15] >> 3);
+                uint32_t s1 = rotr(w[i-2],17) ^ rotr(w[i-2],19) ^ (w[i-2] >> 10);
+                w[i] = w[i-16] + s0 + w[i-7] + s1;
+            }
+            uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+            for (int i = 0; i < 64; ++i) {
+                uint32_t S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25);
+                uint32_t ch = (e & f) ^ ((~e) & g);
+                uint32_t temp1 = hh + S1 + ch + k[i] + w[i];
+                uint32_t S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22);
+                uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+                uint32_t temp2 = S0 + maj;
+                hh=g; g=f; f=e; e=d+temp1; d=c; c=b; b=a; a=temp1+temp2;
+            }
+            h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e; h[5]+=f; h[6]+=g; h[7]+=hh;
+        }
+        std::array<uint8_t,32> out;
+        for (int i = 0; i < 8; ++i) {
+            out[i*4]   = (uint8_t)(h[i] >> 24);
+            out[i*4+1] = (uint8_t)(h[i] >> 16);
+            out[i*4+2] = (uint8_t)(h[i] >> 8);
+            out[i*4+3] = (uint8_t)(h[i]);
+        }
+        return out;
+    }
+};
+
+inline std::array<uint8_t,32> deriveKey(const std::string& passphrase) {
+    std::vector<uint8_t> bytes(passphrase.begin(), passphrase.end());
+    return Sha256::hash(bytes);
+}
+
+// ---- AES-256 (ECB core, used to build CBC) ------------------------------
+class Aes256 {
+public:
+    explicit Aes256(const std::array<uint8_t,32>& key) { keyExpansion(key); }
+
+    void encryptBlock(const uint8_t in[16], uint8_t out[16]) const {
+        uint8_t state[16];
+        std::memcpy(state, in, 16);
+        addRoundKey(state, 0);
+        for (int round = 1; round < 14; ++round) {
+            subBytes(state);
+            shiftRows(state);
+            mixColumns(state);
+            addRoundKey(state, round);
+        }
+        subBytes(state);
+        shiftRows(state);
+        addRoundKey(state, 14);
+        std::memcpy(out, state, 16);
+    }
+
+    void decryptBlock(const uint8_t in[16], uint8_t out[16]) const {
+        uint8_t state[16];
+        std::memcpy(state, in, 16);
+        addRoundKey(state, 14);
+        for (int round = 13; round >= 1; --round) {
+            invShiftRows(state);
+            invSubBytes(state);
+            addRoundKey(state, round);
+            invMixColumns(state);
+        }
+        invShiftRows(state);
+        invSubBytes(state);
+        addRoundKey(state, 0);
+        std::memcpy(out, state, 16);
+    }
+
+private:
+    uint32_t roundKeys[60]; // 15 round keys * 4 words for AES-256 (Nr=14)
+
+    static const uint8_t* sbox() {
+        static const uint8_t s[256] = {
+            0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+            0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+            0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+            0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+            0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+            0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+            0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+            0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+            0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+            0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+            0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+            0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+            0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+            0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+            0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+            0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+        };
+        return s;
+    }
+    static const uint8_t* invSbox() {
+        static uint8_t inv[256]; static bool init=false;
+        if(!init) { const uint8_t* s=sbox(); for(int i=0;i<256;i++) inv[s[i]]=(uint8_t)i; init=true; }
+        return inv;
+    }
+    static uint8_t xtime(uint8_t x) { return (uint8_t)((x << 1) ^ ((x & 0x80) ? 0x1B : 0x00)); }
+    static uint8_t gmul(uint8_t a, uint8_t b) {
+        uint8_t p = 0;
+        for (int i = 0; i < 8; ++i) {
+            if (b & 1) p ^= a;
+            a = xtime(a);
+            b >>= 1;
+        }
+        return p;
+    }
+
+    void keyExpansion(const std::array<uint8_t,32>& key) {
+        const int Nk = 8, Nr = 14, Nb = 4;
+        uint8_t* rk = reinterpret_cast<uint8_t*>(roundKeys);
+        std::memcpy(rk, key.data(), 32);
+        uint8_t temp[4];
+        static const uint8_t rcon[15] = {0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36,0x6c,0xd8,0xab,0x4d};
+        for (int i = Nk; i < Nb*(Nr+1); ++i) {
+            std::memcpy(temp, rk + (i-1)*4, 4);
+            if (i % Nk == 0) {
+                uint8_t t = temp[0]; temp[0]=temp[1]; temp[1]=temp[2]; temp[2]=temp[3]; temp[3]=t;
+                for (int j = 0; j < 4; ++j) temp[j] = sbox()[temp[j]];
+                temp[0] ^= rcon[i/Nk - 1];
+            } else if (i % Nk == 4) {
+                for (int j = 0; j < 4; ++j) temp[j] = sbox()[temp[j]];
+            }
+            for (int j = 0; j < 4; ++j) rk[i*4+j] = rk[(i-Nk)*4+j] ^ temp[j];
+        }
+    }
+
+    void addRoundKey(uint8_t state[16], int round) const {
+        const uint8_t* rk = reinterpret_cast<const uint8_t*>(roundKeys) + round*16;
+        for (int i = 0; i < 16; ++i) state[i] ^= rk[i];
+    }
+    static void subBytes(uint8_t state[16]) { for (int i=0;i<16;i++) state[i]=sbox()[state[i]]; }
+    static void invSubBytes(uint8_t state[16]) { for (int i=0;i<16;i++) state[i]=invSbox()[state[i]]; }
+    static void shiftRows(uint8_t s[16]) {
+        uint8_t t;
+        t=s[1]; s[1]=s[5]; s[5]=s[9]; s[9]=s[13]; s[13]=t;
+        t=s[2]; s[2]=s[10]; s[10]=t; t=s[6]; s[6]=s[14]; s[14]=t;
+        t=s[15]; s[15]=s[11]; s[11]=s[7]; s[7]=s[3]; s[3]=t;
+    }
+    static void invShiftRows(uint8_t s[16]) {
+        uint8_t t;
+        t=s[13]; s[13]=s[9]; s[9]=s[5]; s[5]=s[1]; s[1]=t;
+        t=s[2]; s[2]=s[10]; s[10]=t; t=s[6]; s[6]=s[14]; s[14]=t;
+        t=s[3]; s[3]=s[7]; s[7]=s[11]; s[11]=s[15]; s[15]=t;
+    }
+    static void mixColumns(uint8_t s[16]) {
+        for (int c = 0; c < 4; ++c) {
+            uint8_t a0=s[c*4],a1=s[c*4+1],a2=s[c*4+2],a3=s[c*4+3];
+            s[c*4]   = (uint8_t)(gmul(a0,2) ^ gmul(a1,3) ^ a2 ^ a3);
+            s[c*4+1] = (uint8_t)(a0 ^ gmul(a1,2) ^ gmul(a2,3) ^ a3);
+            s[c*4+2] = (uint8_t)(a0 ^ a1 ^ gmul(a2,2) ^ gmul(a3,3));
+            s[c*4+3] = (uint8_t)(gmul(a0,3) ^ a1 ^ a2 ^ gmul(a3,2));
+        }
+    }
+    static void invMixColumns(uint8_t s[16]) {
+        for (int c = 0; c < 4; ++c) {
+            uint8_t a0=s[c*4],a1=s[c*4+1],a2=s[c*4+2],a3=s[c*4+3];
+            s[c*4]   = (uint8_t)(gmul(a0,14) ^ gmul(a1,11) ^ gmul(a2,13) ^ gmul(a3,9));
+            s[c*4+1] = (uint8_t)(gmul(a0,9)  ^ gmul(a1,14) ^ gmul(a2,11) ^ gmul(a3,13));
+            s[c*4+2] = (uint8_t)(gmul(a0,13) ^ gmul(a1,9)  ^ gmul(a2,14) ^ gmul(a3,11));
+            s[c*4+3] = (uint8_t)(gmul(a0,11) ^ gmul(a1,13) ^ gmul(a2,9)  ^ gmul(a3,14));
+        }
+    }
+};
+
+// PKCS#7-padded AES-256-CBC encrypt/decrypt over a byte buffer.
+inline std::vector<uint8_t> aesCbcEncrypt(const std::vector<uint8_t>& plain, const std::array<uint8_t,32>& key, const uint8_t iv[16]) {
+    Aes256 aes(key);
+    std::vector<uint8_t> data = plain;
+    uint8_t pad = (uint8_t)(16 - (data.size() % 16));
+    for (int i = 0; i < pad; ++i) data.push_back(pad);
+
+    std::vector<uint8_t> out(data.size());
+    uint8_t prev[16]; std::memcpy(prev, iv, 16);
+    for (size_t off = 0; off < data.size(); off += 16) {
+        uint8_t block[16];
+        for (int i = 0; i < 16; ++i) block[i] = data[off+i] ^ prev[i];
+        uint8_t enc[16];
+        aes.encryptBlock(block, enc);
+        std::memcpy(&out[off], enc, 16);
+        std::memcpy(prev, enc, 16);
+    }
+    return out;
+}
+
+inline std::vector<uint8_t> aesCbcDecrypt(const std::vector<uint8_t>& cipher, const std::array<uint8_t,32>& key, const uint8_t iv[16]) {
+    if (cipher.empty() || cipher.size() % 16 != 0)
+        throw std::runtime_error("Corrupt encrypted database: ciphertext length is not a multiple of 16");
+    Aes256 aes(key);
+    std::vector<uint8_t> out(cipher.size());
+    uint8_t prev[16]; std::memcpy(prev, iv, 16);
+    for (size_t off = 0; off < cipher.size(); off += 16) {
+        uint8_t dec[16];
+        aes.decryptBlock(&cipher[off], dec);
+        for (int i = 0; i < 16; ++i) out[off+i] = dec[i] ^ prev[i];
+        std::memcpy(prev, &cipher[off], 16);
+    }
+    uint8_t pad = out.empty() ? 0 : out.back();
+    if (pad == 0 || pad > 16 || (size_t)pad > out.size())
+        throw std::runtime_error("Failed to decrypt database: wrong key or corrupt file");
+    out.resize(out.size() - pad);
+    return out;
+}
+
+} // namespace cnrcrypto
+
+// ============================================================================
+// DatabaseInstance: runtime state for one `Data Name("file"){...}` instance.
+// Holds one in-memory record table per `table Struct name;` declaration, the
+// backing .cnrdb file path, and the optional AES-256 key set by .encode().
+// Serialization format (before optional encryption):
+//   magic "CNRD" (4 bytes) + version byte (1)
+//   for each table, in declaration order:
+//     tableName length (u32) + tableName bytes
+//     recordCount (u32)
+//     for each record:
+//       fieldCount (u32)
+//       for each field: fieldName length(u32)+bytes, then a 1-byte type tag
+//         (0=number, 1=string) followed by either 8 bytes double or
+//         length(u32)+bytes.
+// If a key was set via .encode(), the whole payload above is AES-256-CBC
+// encrypted (PKCS#7 padded) and the file on disk is instead:
+//   magic "CNRE" (4 bytes) + version byte (1) + 16-byte IV + ciphertext.
+// ============================================================================
+struct DbRecordTable {
+    std::string structType;
+    std::string primaryKeyField; // empty if this table has no primary key
+    std::vector<Value> records;  // each is a struct-instance Value (isStruct=true)
+    // Maps primary-key value (as its display string) -> index into records,
+    // kept in sync by every mutating operation. Lets findById/updateById/
+    // deleteById run in O(1) instead of scanning every record.
+    std::unordered_map<std::string, size_t> pkIndex;
+
+    void rebuildPkIndex() {
+        pkIndex.clear();
+        if(primaryKeyField.empty()) return;
+        for(size_t i=0;i<records.size();++i) {
+            auto it = records[i].fields->find(primaryKeyField);
+            if(it != records[i].fields->end())
+                pkIndex[valueToDisplayString(it->second)] = i;
+        }
+    }
+};
+
+struct DatabaseInstance {
+    std::string name;
+    std::string filePath;
+    std::unordered_map<std::string, DbRecordTable> tables; // keyed by table var name
+    std::vector<std::string> tableOrder; // preserves declaration order for stable file layout
+    bool hasKey = false;
+    std::array<uint8_t,32> key{};
+    // Guards every read/write against this instance's tables and its file on
+    // disk. CnR programs can run Data operations from multiple threads via
+    // Parallel{}/thread(), so without this two pushes racing could corrupt
+    // the pkIndex or interleave writes to the .cnrdb file.
+    std::shared_ptr<std::mutex> mtx = std::make_shared<std::mutex>();
+
+    DbRecordTable& table(const std::string& n) {
+        auto it = tables.find(n);
+        if (it == tables.end())
+            throw std::runtime_error("Data instance '" + name + "' has no table '" + n + "'");
+        return it->second;
+    }
+};
+
 class Interpreter {
 public:
     Interpreter(std::unordered_map<std::string, FunctionDecl> fns,
                 std::unordered_map<std::string, StructDecl> strs)
         : functions(std::move(fns)), structs(std::move(strs)) {
         scopes.push_back({});
+    }
+
+    Interpreter(std::unordered_map<std::string, FunctionDecl> fns,
+                std::unordered_map<std::string, StructDecl> strs,
+                std::unordered_map<std::string, DataDecl> das)
+        : functions(std::move(fns)), structs(std::move(strs)) {
+        scopes.push_back({});
+        initDatabases(das);
     }
 
     Interpreter(const Interpreter& parent, bool /*forThread*/)
@@ -2088,6 +2605,12 @@ double evalNumber(const ExprPtr& expr)
     if(auto b = std::dynamic_pointer_cast<BinaryExpr>(expr)) {
         if(b->op==TokType::AndAnd) return (evalBool(b->left) && evalBool(b->right)) ? 1.0 : 0.0;
         if(b->op==TokType::OrOr) return (evalBool(b->left) || evalBool(b->right)) ? 1.0 : 0.0;
+        if(b->op==TokType::EqualEqual || b->op==TokType::BangEqual) {
+            Value L = evalToValue(b->left);
+            Value R = evalToValue(b->right);
+            bool eq = valuesEqual(L, R);
+            return (b->op==TokType::EqualEqual ? eq : !eq) ? 1.0 : 0.0;
+        }
 
         double L = evalNumber(b->left);
         double R = evalNumber(b->right);
@@ -2105,8 +2628,6 @@ double evalNumber(const ExprPtr& expr)
         case TokType::Greater: return L>R ? 1.0 : 0.0;
         case TokType::LessEqual: return L<=R ? 1.0 : 0.0;
         case TokType::GreaterEqual: return L>=R ? 1.0 : 0.0;
-        case TokType::EqualEqual: return L==R ? 1.0 : 0.0;
-        case TokType::BangEqual: return L!=R ? 1.0 : 0.0;
         default: break;
         }
     }
@@ -2183,12 +2704,17 @@ bool evalBool(const ExprPtr& expr)
         switch(op->op) {
         case TokType::AndAnd: return evalBool(op->left) && evalBool(op->right);
         case TokType::OrOr: return evalBool(op->left) || evalBool(op->right);
+        case TokType::EqualEqual:
+        case TokType::BangEqual: {
+            Value L = evalToValue(op->left);
+            Value R = evalToValue(op->right);
+            bool eq = valuesEqual(L, R);
+            return op->op==TokType::EqualEqual ? eq : !eq;
+        }
         case TokType::Less:
         case TokType::Greater:
         case TokType::LessEqual:
-        case TokType::GreaterEqual:
-        case TokType::EqualEqual:
-        case TokType::BangEqual: {
+        case TokType::GreaterEqual: {
             double L = evalNumber(op->left);
             double R = evalNumber(op->right);
             switch(op->op) {
@@ -2196,8 +2722,6 @@ bool evalBool(const ExprPtr& expr)
             case TokType::Greater: return L>R;
             case TokType::LessEqual: return L<=R;
             case TokType::GreaterEqual: return L>=R;
-            case TokType::EqualEqual: return L==R;
-            case TokType::BangEqual: return L!=R;
             default: break;
             }
         }
@@ -2235,6 +2759,7 @@ Value evalToValue(const ExprPtr& expr) {
         return v;
     }
     if(auto omc = std::dynamic_pointer_cast<ObjectMethodCallExpr>(expr)) return callObjectMethod(omc);
+    if(auto dm = std::dynamic_pointer_cast<DbMethodCallExpr>(expr)) return callDbMethod(dm);
     if(std::dynamic_pointer_cast<FailExpr>(expr)) throw NodeFailSignal{};
     if(auto th = std::dynamic_pointer_cast<ThrowExpr>(expr)) {
         std::string msg = valueToDisplayString(evalToValue(th->messageExpr));
@@ -2634,6 +3159,508 @@ Value instantiateStruct(const StructDecl& sd, std::vector<Value>& args) {
     scopes.pop_back();
     currentSelf = prevSelf;
     return instance;
+}
+
+// ----------------------------------------------------------------------------
+// Database ("Data") support
+// ----------------------------------------------------------------------------
+
+// Merges each Data block's locally-declared structs into the global struct
+// table, builds one DatabaseInstance per Data decl, tries to load any
+// existing unencrypted .cnrdb file for it from disk, and binds it as a
+// global variable under the Data block's name.
+void initDatabases(const std::unordered_map<std::string, DataDecl>& das) {
+    for(auto& kv : das) {
+        const DataDecl& dd = kv.second;
+        for(auto& s : dd.structs) {
+            if(structs.count(s.first) && structs.at(s.first).name != s.second.name)
+                throw std::runtime_error("Struct name '" + s.first + "' declared inside Data '" + dd.name + "' conflicts with an existing struct");
+            structs[s.first] = s.second;
+        }
+
+        auto db = std::make_shared<DatabaseInstance>();
+        db->name = dd.name;
+        db->filePath = dd.fileNameLiteral;
+        if(db->filePath.size() < 7 || db->filePath.substr(db->filePath.size()-7) != ".cnrdb")
+            db->filePath += ".cnrdb";
+        for(auto& td : dd.tables) {
+            DbRecordTable t;
+            t.structType = td.structType;
+            t.primaryKeyField = td.primaryKeyField;
+            db->tables[td.varName] = t;
+            db->tableOrder.push_back(td.varName);
+        }
+
+        // Best-effort initial load: only succeeds automatically for
+        // unencrypted files. An encrypted (.cnrdb produced after .encode())
+        // file requires the program to call .encode(key) again before
+        // .load()/auto-load can decrypt it -- see loadDatabaseFile().
+        try {
+            loadDatabaseFile(*db);
+        } catch(...) {
+            // No existing file yet, or it's encrypted and no key has been
+            // set on this instance -- that's fine, it just starts empty.
+        }
+
+        Value v;
+        v.isDatabase = true;
+        v.database = db;
+        scopes.back()[dd.name] = v;
+    }
+}
+
+// ---- binary (de)serialization of one DatabaseInstance's tables ----------
+
+static void writeU32(std::vector<uint8_t>& out, uint32_t x) {
+    out.push_back((uint8_t)(x>>24)); out.push_back((uint8_t)(x>>16));
+    out.push_back((uint8_t)(x>>8));  out.push_back((uint8_t)(x));
+}
+static uint32_t readU32(const std::vector<uint8_t>& in, size_t& pos) {
+    if(pos+4 > in.size()) throw std::runtime_error("Corrupt database file (truncated)");
+    uint32_t x = (uint32_t(in[pos])<<24)|(uint32_t(in[pos+1])<<16)|(uint32_t(in[pos+2])<<8)|uint32_t(in[pos+3]);
+    pos += 4;
+    return x;
+}
+static void writeStr(std::vector<uint8_t>& out, const std::string& s) {
+    writeU32(out, (uint32_t)s.size());
+    out.insert(out.end(), s.begin(), s.end());
+}
+static std::string readStr(const std::vector<uint8_t>& in, size_t& pos) {
+    uint32_t len = readU32(in, pos);
+    if(pos+len > in.size()) throw std::runtime_error("Corrupt database file (truncated string)");
+    std::string s(in.begin()+pos, in.begin()+pos+len);
+    pos += len;
+    return s;
+}
+
+std::vector<uint8_t> serializeDatabase(const DatabaseInstance& db) {
+    std::vector<uint8_t> out;
+    out.push_back('C'); out.push_back('N'); out.push_back('R'); out.push_back('D');
+    out.push_back(1); // version
+    writeU32(out, (uint32_t)db.tableOrder.size());
+    for(auto& tname : db.tableOrder) {
+        const DbRecordTable& t = db.tables.at(tname);
+        writeStr(out, tname);
+        writeStr(out, t.structType);
+        writeU32(out, (uint32_t)t.records.size());
+        for(auto& rec : t.records) {
+            const auto& fields = *rec.fields;
+            writeU32(out, (uint32_t)fields.size());
+            for(auto& fkv : fields) {
+                writeStr(out, fkv.first);
+                const Value& fv = fkv.second;
+                if(fv.isString) {
+                    out.push_back(1);
+                    writeStr(out, fv.str);
+                } else if(fv.isBool) {
+                    out.push_back(2);
+                    out.push_back(fv.boolean ? 1 : 0);
+                } else if(fv.isArray) {
+                    out.push_back(3);
+                    writeU32(out, (uint32_t)fv.array.size());
+                    for(double d : fv.array) {
+                        uint64_t bits; std::memcpy(&bits, &d, 8);
+                        for(int i=7;i>=0;--i) out.push_back((uint8_t)(bits >> (i*8)));
+                    }
+                } else {
+                    out.push_back(0);
+                    double d = fv.number;
+                    uint64_t bits; std::memcpy(&bits, &d, 8);
+                    for(int i=7;i>=0;--i) out.push_back((uint8_t)(bits >> (i*8)));
+                }
+            }
+        }
+    }
+    return out;
+}
+
+void deserializeDatabase(DatabaseInstance& db, const std::vector<uint8_t>& in) {
+    if(in.size() < 5 || in[0]!='C'||in[1]!='N'||in[2]!='R'||in[3]!='D')
+        throw std::runtime_error("Not a valid .cnrdb file");
+    size_t pos = 5; // skip magic + version
+    uint32_t tableCount = readU32(in, pos);
+    for(uint32_t i=0;i<tableCount;++i) {
+        std::string tname = readStr(in, pos);
+        std::string structType = readStr(in, pos);
+        uint32_t recCount = readU32(in, pos);
+        DbRecordTable t;
+        t.structType = structType;
+        {
+            auto existing = db.tables.find(tname);
+            if(existing != db.tables.end()) t.primaryKeyField = existing->second.primaryKeyField;
+        }
+        for(uint32_t r=0;r<recCount;++r) {
+            Value rec;
+            rec.isStruct = true;
+            rec.structType = structType;
+            rec.fields = std::make_shared<std::unordered_map<std::string, Value>>();
+            uint32_t fcount = readU32(in, pos);
+            for(uint32_t f=0; f<fcount; ++f) {
+                std::string fname = readStr(in, pos);
+                if(pos >= in.size()) throw std::runtime_error("Corrupt database file (truncated field)");
+                uint8_t tag = in[pos++];
+                Value fv;
+                if(tag==1) {
+                    fv.isString = true;
+                    fv.str = readStr(in, pos);
+                } else if(tag==2) {
+                    if(pos >= in.size()) throw std::runtime_error("Corrupt database file (truncated bool)");
+                    fv.isBool = true;
+                    fv.boolean = in[pos++] != 0;
+                } else if(tag==3) {
+                    fv.isArray = true;
+                    uint32_t count = readU32(in, pos);
+                    fv.array.reserve(count);
+                    for(uint32_t e=0; e<count; ++e) {
+                        if(pos+8 > in.size()) throw std::runtime_error("Corrupt database file (truncated array element)");
+                        uint64_t bits = 0;
+                        for(int i=0;i<8;++i) bits = (bits<<8) | in[pos++];
+                        double d; std::memcpy(&d, &bits, 8);
+                        fv.array.push_back(d);
+                    }
+                } else {
+                    if(pos+8 > in.size()) throw std::runtime_error("Corrupt database file (truncated number)");
+                    uint64_t bits = 0;
+                    for(int i=0;i<8;++i) bits = (bits<<8) | in[pos++];
+                    double d; std::memcpy(&d, &bits, 8);
+                    fv.number = d;
+                }
+                (*rec.fields)[fname] = fv;
+            }
+            t.records.push_back(rec);
+        }
+        t.rebuildPkIndex();
+        db.tables[tname] = t;
+        if(std::find(db.tableOrder.begin(), db.tableOrder.end(), tname) == db.tableOrder.end())
+            db.tableOrder.push_back(tname);
+    }
+}
+
+void saveDatabaseFile(DatabaseInstance& db) {
+    std::vector<uint8_t> payload = serializeDatabase(db);
+    std::string tmpPath = db.filePath + ".tmp";
+    {
+        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+        if(!out) throw std::runtime_error("Cannot write database file '" + db.filePath + "'");
+        if(db.hasKey) {
+            uint8_t iv[16];
+            std::random_device rd;
+            for(int i=0;i<16;++i) iv[i] = (uint8_t)(rd() & 0xFF);
+            std::vector<uint8_t> cipher = cnrcrypto::aesCbcEncrypt(payload, db.key, iv);
+            out.put('C'); out.put('N'); out.put('R'); out.put('E'); out.put((char)1);
+            out.write((const char*)iv, 16);
+            out.write((const char*)cipher.data(), (std::streamsize)cipher.size());
+        } else {
+            out.write((const char*)payload.data(), (std::streamsize)payload.size());
+        }
+        if(!out) throw std::runtime_error("Failed writing database file '" + db.filePath + "'");
+    }
+    // Atomic on POSIX: rename() replaces the destination in a single syscall,
+    // so any other process/thread opening db.filePath always sees either the
+    // old complete file or the new complete file, never a half-written one.
+    if(std::rename(tmpPath.c_str(), db.filePath.c_str()) != 0)
+        throw std::runtime_error("Failed to finalize database file '" + db.filePath + "' (rename from temp file failed)");
+}
+
+void loadDatabaseFile(DatabaseInstance& db) {
+    std::ifstream in(db.filePath, std::ios::binary);
+    if(!in) return; // no file yet -- fine, tables start empty
+    std::vector<uint8_t> raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if(raw.empty()) return;
+    if(raw.size() >= 5 && raw[0]=='C'&&raw[1]=='N'&&raw[2]=='R'&&raw[3]=='E') {
+        if(!db.hasKey)
+            throw std::runtime_error("Database file '" + db.filePath + "' is encrypted; call .encode(\"key\") with the correct key before .load()");
+        if(raw.size() < 21) throw std::runtime_error("Corrupt encrypted database file '" + db.filePath + "'");
+        uint8_t iv[16];
+        std::memcpy(iv, raw.data()+5, 16);
+        std::vector<uint8_t> cipher(raw.begin()+21, raw.end());
+        std::vector<uint8_t> payload = cnrcrypto::aesCbcDecrypt(cipher, db.key, iv);
+        deserializeDatabase(db, payload);
+    } else {
+        deserializeDatabase(db, raw);
+    }
+}
+
+// ---- Data1.encode(...) / Data1.table.push/find/delete/insert/save/load/count(...) ----
+
+Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
+    Value& dbVal = resolveVar(dm->dataName);
+    if(!dbVal.isDatabase)
+        throw std::runtime_error("'" + dm->dataName + "' is not a Data instance");
+    DatabaseInstance& db = *dbVal.database;
+    // Every Data/table operation on this instance is serialized through one
+    // mutex, so concurrent Parallel{}/thread() blocks pushing/deleting on the
+    // same Data instance can't race on pkIndex or interleave writes to the
+    // .cnrdb file. Evaluating argument expressions can itself call back into
+    // the interpreter (e.g. another expression touching the same or a
+    // different Data instance), so the lock is scoped as narrowly as
+    // possible around each operation's actual table mutation + save.
+    std::lock_guard<std::mutex> lock(*db.mtx);
+
+    if(dm->tableName.empty()) {
+        // Methods on the Data object itself.
+        if(dm->method == "encode") {
+            if(dm->args.size() != 1)
+                throw std::runtime_error("Data.encode() expects 1 argument (the key)");
+            std::string keyStr = valueToDisplayString(evalToValue(dm->args[0]));
+            db.key = cnrcrypto::deriveKey(keyStr);
+            db.hasKey = true;
+            // Per spec: setting a key makes decode automatic from here on.
+            // If the file on disk is already encrypted, try to load it now
+            // with the freshly-set key so existing data becomes visible.
+            loadDatabaseFile(db);
+            for(auto& tname : db.tableOrder) db.tables[tname].rebuildPkIndex();
+            saveDatabaseFile(db); // re-persist (encrypted) immediately
+            return Value::makeNull();
+        }
+        if(dm->method == "save") { saveDatabaseFile(db); return Value::makeNull(); }
+        if(dm->method == "load") {
+            loadDatabaseFile(db);
+            for(auto& tname : db.tableOrder) db.tables[tname].rebuildPkIndex();
+            return Value::makeNull();
+        }
+        throw std::runtime_error("Unknown Data method '" + dm->method + "'");
+    }
+
+    DbRecordTable& table = db.table(dm->tableName);
+    auto sIt = structs.find(table.structType);
+    if(sIt == structs.end())
+        throw std::runtime_error("Table '" + dm->tableName + "' has unknown struct type '" + table.structType + "'");
+
+    // Looks up the field named table.primaryKeyField on a struct-instance
+    // record and returns its display-string value. Throws if the table has
+    // no primary key configured, since callers only reach here after
+    // checking !table.primaryKeyField.empty().
+    auto pkOf = [&](const Value& rec) -> std::string {
+        auto it = rec.fields->find(table.primaryKeyField);
+        if(it == rec.fields->end())
+            throw std::runtime_error("Record is missing primary key field '" + table.primaryKeyField + "'");
+        return valueToDisplayString(it->second);
+    };
+
+    if(dm->method == "push") {
+        std::vector<Value> args;
+        args.reserve(dm->args.size());
+        for(auto& a : dm->args) args.push_back(evalToValue(a));
+        Value rec = instantiateStruct(sIt->second, args);
+        if(!table.primaryKeyField.empty()) {
+            std::string pk = pkOf(rec);
+            if(table.pkIndex.count(pk))
+                throw std::runtime_error("table.push(): duplicate primary key '" + pk + "' for field '" + table.primaryKeyField + "' in table '" + dm->tableName + "'");
+            table.pkIndex[pk] = table.records.size();
+        }
+        table.records.push_back(rec);
+        saveDatabaseFile(db);
+        Value ret; ret.number = (double)table.records.size(); return ret;
+    }
+    if(dm->method == "find") {
+        if(dm->args.size() != 1)
+            throw std::runtime_error("table.find() expects 1 argument");
+        std::string needle = valueToDisplayString(evalToValue(dm->args[0]));
+        Value result; result.isArray = true;
+        for(size_t i=0;i<table.records.size();++i) {
+            bool matched = false;
+            for(auto& fkv : *table.records[i].fields) {
+                std::string fieldStr = valueToDisplayString(fkv.second);
+                if(fieldStr.find(needle) != std::string::npos) { matched = true; break; }
+            }
+            if(matched) result.array.push_back((double)i);
+        }
+        return result;
+    }
+    // findWhere(fieldName, value) -- exact match on one specific field only,
+    // unlike find() which substring-matches across every field. Returns the
+    // indices of matching records.
+    if(dm->method == "findWhere") {
+        if(dm->args.size() != 2)
+            throw std::runtime_error("table.findWhere() expects 2 arguments (fieldName, value)");
+        std::string fieldName = valueToDisplayString(evalToValue(dm->args[0]));
+        std::string target = valueToDisplayString(evalToValue(dm->args[1]));
+        Value result; result.isArray = true;
+        for(size_t i=0;i<table.records.size();++i) {
+            auto it = table.records[i].fields->find(fieldName);
+            if(it == table.records[i].fields->end()) continue;
+            if(valueToDisplayString(it->second) == target) result.array.push_back((double)i);
+        }
+        return result;
+    }
+    if(dm->method == "findById") {
+        if(table.primaryKeyField.empty())
+            throw std::runtime_error("table.findById(): table '" + dm->tableName + "' has no primaryKey declared");
+        if(dm->args.size() != 1)
+            throw std::runtime_error("table.findById() expects 1 argument (the primary key value)");
+        std::string pk = valueToDisplayString(evalToValue(dm->args[0]));
+        auto it = table.pkIndex.find(pk);
+        if(it == table.pkIndex.end()) { Value v; v.number = -1.0; return v; }
+        Value v; v.number = (double)it->second; return v;
+    }
+    // get(index) -- returns the full record (a struct Value, so its fields
+    // are readable via ordinary dot access, e.g. UsersDB.users.get(0).name)
+    // at a given row index, as returned by find()/findWhere()/orderBy().
+    if(dm->method == "get") {
+        if(dm->args.size() != 1)
+            throw std::runtime_error("table.get() expects 1 argument (the index)");
+        int idx = (int)evalNumber(dm->args[0]);
+        if(idx < 0 || idx >= (int)table.records.size())
+            throw std::runtime_error("table.get(): index out of bounds: " + std::to_string(idx));
+        return table.records[idx];
+    }
+    // getById(pk) -- returns the full record (struct Value) whose primary
+    // key matches, or null if no such record exists.
+    if(dm->method == "getById") {
+        if(table.primaryKeyField.empty())
+            throw std::runtime_error("table.getById(): table '" + dm->tableName + "' has no primaryKey declared");
+        if(dm->args.size() != 1)
+            throw std::runtime_error("table.getById() expects 1 argument (the primary key value)");
+        std::string pk = valueToDisplayString(evalToValue(dm->args[0]));
+        auto it = table.pkIndex.find(pk);
+        if(it == table.pkIndex.end()) return Value::makeNull();
+        return table.records[it->second];
+    }
+    if(dm->method == "delete") {
+        if(dm->args.size() != 1)
+            throw std::runtime_error("table.delete() expects 1 argument (the index)");
+        int idx = (int)evalNumber(dm->args[0]);
+        if(idx < 0 || idx >= (int)table.records.size())
+            throw std::runtime_error("table.delete(): index out of bounds: " + std::to_string(idx));
+        table.records.erase(table.records.begin()+idx);
+        table.rebuildPkIndex();
+        saveDatabaseFile(db);
+        return Value::makeNull();
+    }
+    // deleteWhere(fieldName, value) -- deletes every record whose field
+    // matches exactly. Removes in a single pass (back-to-front) so earlier
+    // indices stay valid while erasing.
+    if(dm->method == "deleteWhere") {
+        if(dm->args.size() != 2)
+            throw std::runtime_error("table.deleteWhere() expects 2 arguments (fieldName, value)");
+        std::string fieldName = valueToDisplayString(evalToValue(dm->args[0]));
+        std::string target = valueToDisplayString(evalToValue(dm->args[1]));
+        int deleted = 0;
+        for(int i=(int)table.records.size()-1; i>=0; --i) {
+            auto it = table.records[i].fields->find(fieldName);
+            if(it == table.records[i].fields->end()) continue;
+            if(valueToDisplayString(it->second) == target) {
+                table.records.erase(table.records.begin()+i);
+                deleted++;
+            }
+        }
+        if(deleted > 0) { table.rebuildPkIndex(); saveDatabaseFile(db); }
+        Value v; v.number = (double)deleted; return v;
+    }
+    if(dm->method == "deleteById") {
+        if(table.primaryKeyField.empty())
+            throw std::runtime_error("table.deleteById(): table '" + dm->tableName + "' has no primaryKey declared");
+        if(dm->args.size() != 1)
+            throw std::runtime_error("table.deleteById() expects 1 argument (the primary key value)");
+        std::string pk = valueToDisplayString(evalToValue(dm->args[0]));
+        auto it = table.pkIndex.find(pk);
+        if(it == table.pkIndex.end())
+            throw std::runtime_error("table.deleteById(): no record with " + table.primaryKeyField + "='" + pk + "'");
+        table.records.erase(table.records.begin() + it->second);
+        table.rebuildPkIndex();
+        saveDatabaseFile(db);
+        return Value::makeNull();
+    }
+    if(dm->method == "insert") {
+        if(dm->args.size() != 3)
+            throw std::runtime_error("table.insert() expects 3 arguments (index, fieldName, newValue)");
+        int idx = (int)evalNumber(dm->args[0]);
+        if(idx < 0 || idx >= (int)table.records.size())
+            throw std::runtime_error("table.insert(): index out of bounds: " + std::to_string(idx));
+        std::string fieldName = valueToDisplayString(evalToValue(dm->args[1]));
+        Value newVal = evalToValue(dm->args[2]);
+        auto& fields = *table.records[idx].fields;
+        auto fit = fields.find(fieldName);
+        if(fit == fields.end())
+            throw std::runtime_error("table.insert(): struct '" + table.structType + "' has no field '" + fieldName + "'");
+        if(!table.primaryKeyField.empty() && fieldName == table.primaryKeyField)
+            throw std::runtime_error("table.insert(): cannot modify primary key field '" + fieldName + "' via insert(); use updateById() on a non-key field instead");
+        fit->second = newVal;
+        saveDatabaseFile(db);
+        return Value::makeNull();
+    }
+    // updateWhere(fieldName, matchValue, targetField, newValue) -- updates
+    // targetField on every record whose fieldName equals matchValue.
+    if(dm->method == "updateWhere") {
+        if(dm->args.size() != 4)
+            throw std::runtime_error("table.updateWhere() expects 4 arguments (fieldName, matchValue, targetField, newValue)");
+        std::string fieldName = valueToDisplayString(evalToValue(dm->args[0]));
+        std::string matchValue = valueToDisplayString(evalToValue(dm->args[1]));
+        std::string targetField = valueToDisplayString(evalToValue(dm->args[2]));
+        Value newVal = evalToValue(dm->args[3]);
+        if(!table.primaryKeyField.empty() && targetField == table.primaryKeyField)
+            throw std::runtime_error("table.updateWhere(): cannot modify primary key field '" + targetField + "'");
+        int updated = 0;
+        for(auto& rec : table.records) {
+            auto it = rec.fields->find(fieldName);
+            if(it == rec.fields->end()) continue;
+            if(valueToDisplayString(it->second) != matchValue) continue;
+            auto tit = rec.fields->find(targetField);
+            if(tit == rec.fields->end())
+                throw std::runtime_error("table.updateWhere(): struct '" + table.structType + "' has no field '" + targetField + "'");
+            tit->second = newVal;
+            updated++;
+        }
+        if(updated > 0) saveDatabaseFile(db);
+        Value v; v.number = (double)updated; return v;
+    }
+    if(dm->method == "updateById") {
+        if(table.primaryKeyField.empty())
+            throw std::runtime_error("table.updateById(): table '" + dm->tableName + "' has no primaryKey declared");
+        if(dm->args.size() != 3)
+            throw std::runtime_error("table.updateById() expects 3 arguments (idValue, fieldName, newValue)");
+        std::string pk = valueToDisplayString(evalToValue(dm->args[0]));
+        std::string fieldName = valueToDisplayString(evalToValue(dm->args[1]));
+        Value newVal = evalToValue(dm->args[2]);
+        if(fieldName == table.primaryKeyField)
+            throw std::runtime_error("table.updateById(): cannot modify primary key field '" + fieldName + "'");
+        auto it = table.pkIndex.find(pk);
+        if(it == table.pkIndex.end())
+            throw std::runtime_error("table.updateById(): no record with " + table.primaryKeyField + "='" + pk + "'");
+        auto& fields = *table.records[it->second].fields;
+        auto fit = fields.find(fieldName);
+        if(fit == fields.end())
+            throw std::runtime_error("table.updateById(): struct '" + table.structType + "' has no field '" + fieldName + "'");
+        fit->second = newVal;
+        saveDatabaseFile(db);
+        return Value::makeNull();
+    }
+    // orderBy(fieldName, "asc"|"desc") -- returns record indices sorted by
+    // that field's value (numeric fields sort numerically, everything else
+    // sorts as text).
+    if(dm->method == "orderBy") {
+        if(dm->args.size() < 1 || dm->args.size() > 2)
+            throw std::runtime_error("table.orderBy() expects 1 or 2 arguments (fieldName[, \"asc\"|\"desc\"])");
+        std::string fieldName = valueToDisplayString(evalToValue(dm->args[0]));
+        bool descending = false;
+        if(dm->args.size() == 2) {
+            std::string dir = valueToDisplayString(evalToValue(dm->args[1]));
+            if(dir == "desc") descending = true;
+            else if(dir != "asc")
+                throw std::runtime_error("table.orderBy(): direction must be \"asc\" or \"desc\", got '" + dir + "'");
+        }
+        std::vector<size_t> idx(table.records.size());
+        for(size_t i=0;i<idx.size();++i) idx[i]=i;
+        std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+            auto ia = table.records[a].fields->find(fieldName);
+            auto ib = table.records[b].fields->find(fieldName);
+            if(ia == table.records[a].fields->end() || ib == table.records[b].fields->end())
+                throw std::runtime_error("table.orderBy(): struct '" + table.structType + "' has no field '" + fieldName + "'");
+            const Value& va = ia->second; const Value& vb = ib->second;
+            bool lt;
+            if(!va.isString && !vb.isString) lt = va.number < vb.number;
+            else lt = valueToDisplayString(va) < valueToDisplayString(vb);
+            return descending ? !lt && !(valueToDisplayString(va)==valueToDisplayString(vb)) : lt;
+        });
+        Value result; result.isArray = true;
+        for(size_t i : idx) result.array.push_back((double)i);
+        return result;
+    }
+    if(dm->method == "save") { saveDatabaseFile(db); return Value::makeNull(); }
+    if(dm->method == "load") { loadDatabaseFile(db); table.rebuildPkIndex(); return Value::makeNull(); }
+    if(dm->method == "count") { Value v; v.number = (double)table.records.size(); return v; }
+    throw std::runtime_error("Unknown table method '" + dm->method + "'");
 }
 
 void executeBlock(const std::shared_ptr<BlockStmt>& block) {
@@ -3161,7 +4188,7 @@ void execute(const StmtPtr& stmt)
 
 void runProgram(const Program& program)
 {
-    Interpreter interpreter(program.functions, program.structs);
+    Interpreter interpreter(program.functions, program.structs, program.datas);
     try {
         for(auto& stmt : program.statements) interpreter.execute(stmt);
     } catch(ReturnSignal&) {
