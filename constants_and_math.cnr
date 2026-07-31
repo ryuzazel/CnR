@@ -1,0 +1,37 @@
+// ==========================================================
+// Example: special constants and math functions
+// ==========================================================
+
+print("--- constants ---");
+print(pi);
+print(euler); // same as e
+print(phi);   // golden ratio
+print(psi);   // golden ratio conjugate: phi + psi == 1, phi * psi == -1
+print(phi + psi);
+print(phi * psi);
+
+print("--- basic math functions ---");
+print(sqrt(2));
+print(sqroot(16));   // alias for sqrt
+print(pow(2, 10));
+print(abs(-5));
+print(floor(3.7));
+print(ceil(3.2));
+print(round(3.5));
+print(log(euler));   // natural log
+print(log10(1000));
+print(exp(1));
+print(sin(0));
+print(cos(0));
+print(min(3, 7));
+print(max(3, 7));
+
+print("--- pow() stays exact with BigInt ---");
+print(pow((BigInt)2, 200)); // exact, no precision loss
+
+print("--- constants mix into typed arithmetic ---");
+var radius = (BigFloat)5;
+var circumference = pi * (BigFloat)2 * radius;
+print(circumference); // extra digits, since pi and radius are BigFloat
+print("e^pi");
+print(pow(euler,pi));

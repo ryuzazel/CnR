@@ -1,0 +1,76 @@
+// matrix_tensor_demo.CnR
+// Demonstrates the new Matrix (rank 2) and Tensor (rank 3+) support.
+//
+// Syntax:
+//   var[][] name = {{...},{...}};        -> Matrix (2-D)
+//   var[][][] name = {{{...}},{{...}}};  -> Tensor (3-D, and so on for more [])
+//   var name[][] = {{...},{...}};        -> alternate form, same as above
+//
+// Indexing/assignment is chained: m[row][col], t[i][j][k], m[row][col] = v;
+// A partial index returns a sub-slice: m[row] is a full row (still an array).
+// len(m) returns the size of the OUTER dimension (row count).
+
+print("== Declaring a 2x2 Matrix ==");
+var[][] m = {{1, 2}, {3, 4}};
+print(m);
+
+print("");
+print("== Declaring a 3x2 Matrix ==");
+var[][] tall = {{1, 2}, {3, 4}, {5, 6}};
+print(tall);
+print("rows: " + len(tall));
+
+print("");
+print("== Reading elements ==");
+print(m[0][0]);
+print(m[0][1]);
+print(m[1][0]);
+print(m[1][1]);
+
+print("");
+print("== Writing elements ==");
+m[1][0] = 99;
+print(m);
+
+print("");
+print("== Row slicing (partial index) ==");
+var row0 = m[0];
+print(row0);
+
+print("");
+print("== Declaring a 2x2x2 Tensor ==");
+var[][][] t = {
+    {{1, 2}, {3, 4}},
+    {{5, 6}, {7, 8}}
+};
+print(t);
+print(t[0][0][0]);
+print(t[1][1][1]);
+
+t[0][1][0] = 42;
+print(t);
+
+print("");
+print("== 2-D slice out of a 3-D Tensor ==");
+var plane = t[1];
+print(plane);
+
+print("");
+print("== Building an identity matrix in a loop ==");
+var[][] id = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+for (var i = 0; i < 3; i = i + 1) {
+    id[i][i] = 1;
+}
+print(id);
+
+print("");
+print("== Summing every element of a Matrix ==");
+var[][] mat = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
+var sum = 0;
+for (var i = 0; i < len(mat); i = i + 1) {
+    var r = mat[i];
+    for (var j = 0; j < len(r); j = j + 1) {
+        sum = sum + mat[i][j];
+    }
+}
+print("sum: " + sum);

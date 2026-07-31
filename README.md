@@ -6,8 +6,7 @@
 
 <br>
 
-`Variables` · `Control Flow` · `Functions & Structs` · `Arrays` · `Threading & Parallel` · `HTTP Client & Server` · `DAG Workflows` · `Try/Catch`
-
+`Compile the file, and run, just as simples as that!`
 </div>
 
 ---
@@ -42,6 +41,8 @@ CnR is being designed with a clear focus on:
 CnR currently uses **double-precision numbers as its native numeric type**, along with strings, booleans, arrays, structs, and objects built on top of them. The language is designed around numerical computing, calculation, and data processing first.
 
 > See `Hello.cnr` for a minimal first program.
+> See `numeric_types.cnr` for all numerical variables.
+> See `BigFloat.cnr` for BigFloat usage.
 
 ### Control Flow
 
@@ -61,6 +62,7 @@ CnR currently supports:
 - Struct declarations with constructors and fields (`Struct`)
 
 > See `linearRegression.cnr` for a full example combining structs, functions, arrays, and loops — a linear regression model trained with gradient descent, entirely in CnR.
+>See `Xor_nn.cnr` for a full example of how matrices works and basic math.
 
 **Planned improvements:** more advanced function systems, better function composition, and additional language abstractions.
 

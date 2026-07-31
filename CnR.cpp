@@ -13,6 +13,7 @@
 #include <cstring>
 #include <random>
 #include <cstdio>
+#include <cmath>
 
 enum class TokType {
     Number, Ident, String,
@@ -23,6 +24,7 @@ enum class TokType {
     NodesKw, OnFailKw, RetryKw, FailKw,
     TryKw, CatchKw, ThrowKw,
     DataKw, TableKw,
+    IntKw, LongKw, FloatKw, BigIntKw, BigFloatKw,
     Plus, Minus, Star, Slash, Percent,
     Assign,
     EqualEqual, BangEqual, Less, LessEqual, Greater, GreaterEqual,
@@ -103,6 +105,11 @@ struct Lexer {
         if (s == "Throw") return {TokType::ThrowKw,s,0,startLine};
         if (s == "Data") return {TokType::DataKw,s,0,startLine};
         if (s == "table") return {TokType::TableKw,s,0,startLine};
+        if (s == "Int") return {TokType::IntKw,s,0,startLine};
+        if (s == "long") return {TokType::LongKw,s,0,startLine};
+        if (s == "Float") return {TokType::FloatKw,s,0,startLine};
+        if (s == "BigInt") return {TokType::BigIntKw,s,0,startLine};
+        if (s == "BigFloat" || s == "bigDouble") return {TokType::BigFloatKw,s,0,startLine};
         return {TokType::Ident,s,0,startLine};
     }
     Token number() {
@@ -198,59 +205,114 @@ struct Lexer {
     }
 };
 
-struct Expr { virtual ~Expr() = default; };
-struct Stmt { virtual ~Stmt() = default; };
+// Tag enums used for O(1) AST dispatch (see ExprKind/StmtKind below). Every
+// concrete Expr/Stmt subclass sets its `kind` in its base-class constructor
+// call, once, at construction time. Hot dispatch functions (evalNumber,
+// evalBool, evalToValue, execute, ...) then `switch` on this tag and
+// `static_cast` to the already-known concrete type instead of trying a long
+// chain of std::dynamic_pointer_cast<T> (which is RTTI-based and, per
+// profiling, was the single largest CPU cost in the interpreter). The
+// static_cast is safe precisely because `kind` is set once at construction
+// and never changes, so it always matches the object's real dynamic type.
+enum class ExprKind {
+    Number, Bool, Var, Unary, Binary, CharCast, StringCast, IntCast, LongCast,
+    FloatCast, BigIntCast, BigFloatCast, StringLit, JsonObjectLit, HttpCall,
+    Len, ArrayAccess, TensorAccess, Call, MemberAccess, Thread, Join, JoinAll,
+    ArrayMethodCall, Fail, Throw, ServerConfig, ObjectMethodCall, DbMethodCall
+};
+enum class StmtKind {
+    VarDecl, Assign, ArrayAssign, MemberAssign, Print, Block, If, While, For,
+    Return, ExprS, Parallel, Nodes, TryCatch, RouteDecl, ServerStart
+};
+
+struct Expr { ExprKind kind; explicit Expr(ExprKind k):kind(k){} virtual ~Expr() = default; };
+struct Stmt { StmtKind kind; explicit Stmt(StmtKind k):kind(k){} virtual ~Stmt() = default; };
 using ExprPtr = std::shared_ptr<Expr>;
 using StmtPtr = std::shared_ptr<Stmt>;
 
-struct NumberExpr : Expr { double value; NumberExpr(double v):value(v){} };
-struct BoolExpr : Expr { bool value; BoolExpr(bool v):value(v){} };
-struct VarExpr : Expr { std::string name; VarExpr(std::string n):name(std::move(n)){} };
-struct UnaryExpr : Expr { TokType op; ExprPtr expr; UnaryExpr(TokType o, ExprPtr e):op(o),expr(std::move(e)){} };
-struct BinaryExpr : Expr { TokType op; ExprPtr left; ExprPtr right; BinaryExpr(TokType o, ExprPtr l, ExprPtr r):op(o),left(std::move(l)),right(std::move(r)){} };
-struct CharCastExpr : Expr { ExprPtr expr; CharCastExpr(ExprPtr e):expr(std::move(e)){} };
-struct StringCastExpr : Expr { ExprPtr expr; StringCastExpr(ExprPtr e):expr(std::move(e)){} };
-struct StringLitExpr : Expr { std::string value; StringLitExpr(std::string v):value(std::move(v)){} };
+struct NumberExpr : Expr { double value; std::string text; NumberExpr(double v):Expr(ExprKind::Number),value(v){} NumberExpr(double v, std::string t):Expr(ExprKind::Number),value(v),text(std::move(t)){} };
+struct BoolExpr : Expr { bool value; BoolExpr(bool v):Expr(ExprKind::Bool),value(v){} };
+struct VarExpr : Expr { std::string name; VarExpr(std::string n):Expr(ExprKind::Var),name(std::move(n)){} };
+struct UnaryExpr : Expr { TokType op; ExprPtr expr; UnaryExpr(TokType o, ExprPtr e):Expr(ExprKind::Unary),op(o),expr(std::move(e)){} };
+struct BinaryExpr : Expr { TokType op; ExprPtr left; ExprPtr right; BinaryExpr(TokType o, ExprPtr l, ExprPtr r):Expr(ExprKind::Binary),op(o),left(std::move(l)),right(std::move(r)){} };
+struct CharCastExpr : Expr { ExprPtr expr; CharCastExpr(ExprPtr e):Expr(ExprKind::CharCast),expr(std::move(e)){} };
+struct StringCastExpr : Expr { ExprPtr expr; StringCastExpr(ExprPtr e):Expr(ExprKind::StringCast),expr(std::move(e)){} };
+struct IntCastExpr : Expr { ExprPtr expr; IntCastExpr(ExprPtr e):Expr(ExprKind::IntCast),expr(std::move(e)){} };
+struct LongCastExpr : Expr { ExprPtr expr; LongCastExpr(ExprPtr e):Expr(ExprKind::LongCast),expr(std::move(e)){} };
+struct FloatCastExpr : Expr { ExprPtr expr; FloatCastExpr(ExprPtr e):Expr(ExprKind::FloatCast),expr(std::move(e)){} };
+struct BigIntCastExpr : Expr { ExprPtr expr; BigIntCastExpr(ExprPtr e):Expr(ExprKind::BigIntCast),expr(std::move(e)){} };
+// precisionExpr == nullptr means "use the default 22-digit precision", i.e.
+// a plain (BigFloat)expr cast. (BigFloat(N))expr instead carries a
+// precision expression (N), evaluated at cast time, giving that value up
+// to 1000 exact fractional digits.
+struct BigFloatCastExpr : Expr { ExprPtr expr; ExprPtr precisionExpr; BigFloatCastExpr(ExprPtr e, ExprPtr p=nullptr):Expr(ExprKind::BigFloatCast),expr(std::move(e)),precisionExpr(std::move(p)){} };
+struct StringLitExpr : Expr { std::string value; StringLitExpr(std::string v):Expr(ExprKind::StringLit),value(std::move(v)){} };
 
-struct JsonObjectLitExpr : Expr { std::vector<std::pair<ExprPtr,ExprPtr>> entries; };
+struct JsonObjectLitExpr : Expr { std::vector<std::pair<ExprPtr,ExprPtr>> entries; JsonObjectLitExpr():Expr(ExprKind::JsonObjectLit){} };
 
 struct HttpCallExpr : Expr {
     std::string method;
     ExprPtr url;
     std::vector<std::pair<ExprPtr,ExprPtr>> headers;
     ExprPtr bodyExpr; // null if no body{} block was given
+    HttpCallExpr():Expr(ExprKind::HttpCall){}
 };
-struct LenExpr : Expr { std::string arrayName; LenExpr(std::string n):arrayName(std::move(n)){} };
-struct ArrayAccessExpr : Expr { std::string arrayName; ExprPtr index; ArrayAccessExpr(std::string n, ExprPtr i):arrayName(std::move(n)),index(std::move(i)){} };
-struct CallExpr : Expr { std::string name; std::vector<ExprPtr> args; };
-struct MemberAccessExpr : Expr { ExprPtr base; std::string member; ExprPtr index; };
+struct LenExpr : Expr { std::string arrayName; LenExpr(std::string n):Expr(ExprKind::Len),arrayName(std::move(n)){} };
+struct ArrayAccessExpr : Expr { std::string arrayName; ExprPtr index; ArrayAccessExpr(std::string n, ExprPtr i):Expr(ExprKind::ArrayAccess),arrayName(std::move(n)),index(std::move(i)){} };
+// Chained index access for Matrix/Tensor values, e.g. m[1][0] or t[0][1][2].
+// A full index (indices.size()==dims.size()) returns the scalar element; a
+// partial index returns the sub-slice at that index (still a Matrix/Tensor
+// Value with one fewer dimension).
+struct TensorAccessExpr : Expr { std::string arrayName; std::vector<ExprPtr> indices; TensorAccessExpr():Expr(ExprKind::TensorAccess){} };
+// Recursive literal for var[]...[] = {{...},{...}} initializers. A "leaf"
+// node (isLeaf==true) holds flat scalar expressions (the innermost row);
+// otherwise children holds one nested literal per element at this depth.
+struct NestedArrayLitExpr {
+    bool isLeaf = false;
+    std::vector<ExprPtr> leafValues;
+    std::vector<std::shared_ptr<NestedArrayLitExpr>> children;
+};
+struct CallExpr : Expr { std::string name; std::vector<ExprPtr> args; CallExpr():Expr(ExprKind::Call){} };
+struct MemberAccessExpr : Expr { ExprPtr base; std::string member; ExprPtr index; MemberAccessExpr():Expr(ExprKind::MemberAccess){} };
 
-struct ThreadExpr : Expr { std::string fnName; std::vector<ExprPtr> args; };
-struct JoinExpr : Expr { ExprPtr handleExpr; };
-struct JoinAllExpr : Expr { std::string arrayName; };
+struct ThreadExpr : Expr { std::string fnName; std::vector<ExprPtr> args; ThreadExpr():Expr(ExprKind::Thread){} };
+struct JoinExpr : Expr { ExprPtr handleExpr; JoinExpr():Expr(ExprKind::Join){} };
+struct JoinAllExpr : Expr { std::string arrayName; JoinAllExpr():Expr(ExprKind::JoinAll){} };
 
 enum class ArrayMethod { Push, Pop, Sort, Reverse, Contains, IndexOf, Accumulate };
-struct ArrayMethodCallExpr : Expr { std::string arrayName; ArrayMethod method; ExprPtr arg; };
+struct ArrayMethodCallExpr : Expr { std::string arrayName; ArrayMethod method; ExprPtr arg; ArrayMethodCallExpr():Expr(ExprKind::ArrayMethodCall){} };
 
-struct VarDeclStmt : Stmt { bool isArray = false; bool isEmptyArray = false; std::string name; ExprPtr value; std::vector<ExprPtr> arrayValues; };
-struct AssignStmt : Stmt { std::string name; ExprPtr value; };
-struct ArrayAssignStmt : Stmt { std::string arrayName; ExprPtr index; ExprPtr value; };
-struct MemberAssignStmt : Stmt { std::string objectName; std::string member; ExprPtr index; ExprPtr value; };
-struct PrintStmt : Stmt { bool printChar=false; bool printCharArray=false; ExprPtr expr; std::string arrayName; };
-struct BlockStmt : Stmt { std::vector<StmtPtr> statements; };
-struct IfStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> thenBlock; std::shared_ptr<BlockStmt> elseBlock; };
-struct WhileStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> body; };
-struct ForStmt : Stmt { StmtPtr init; ExprPtr condition; StmtPtr increment; std::shared_ptr<BlockStmt> body; };
-struct ReturnStmt : Stmt { ExprPtr value; };
-struct ExprStmt : Stmt { ExprPtr expr; };
-struct ParallelStmt : Stmt { std::vector<std::shared_ptr<BlockStmt>> blocks; };
+struct VarDeclStmt : Stmt {
+    bool isArray = false; bool isEmptyArray = false; std::string name; ExprPtr value; std::vector<ExprPtr> arrayValues;
+    // tensorRank>0 means this was declared with 2+ bracket pairs, e.g.
+    // var[][] m = {...}; (rank 2, a Matrix) or var[][][] t = {...}; (rank 3,
+    // a Tensor). rank==1 (plain var[] arr = {...};) keeps using arrayValues
+    // above unchanged. nestedInit holds the {{...},{...}} literal tree.
+    int tensorRank = 0;
+    std::shared_ptr<NestedArrayLitExpr> nestedInit;
+    VarDeclStmt():Stmt(StmtKind::VarDecl){}
+};
+struct AssignStmt : Stmt { std::string name; ExprPtr value; AssignStmt():Stmt(StmtKind::Assign){} };
+// index is used for plain 1-D arrays (arr[i] = v;), kept for backward
+// compatibility. indices (2+ entries) is used for Matrix/Tensor chained
+// assignment, e.g. m[1][0] = v; or t[0][1][2] = v;
+struct ArrayAssignStmt : Stmt { std::string arrayName; ExprPtr index; ExprPtr value; std::vector<ExprPtr> indices; ArrayAssignStmt():Stmt(StmtKind::ArrayAssign){} };
+struct MemberAssignStmt : Stmt { std::string objectName; std::string member; ExprPtr index; ExprPtr value; MemberAssignStmt():Stmt(StmtKind::MemberAssign){} };
+struct PrintStmt : Stmt { bool printChar=false; bool printCharArray=false; ExprPtr expr; std::string arrayName; PrintStmt():Stmt(StmtKind::Print){} };
+struct BlockStmt : Stmt { std::vector<StmtPtr> statements; BlockStmt():Stmt(StmtKind::Block){} };
+struct IfStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> thenBlock; std::shared_ptr<BlockStmt> elseBlock; IfStmt():Stmt(StmtKind::If){} };
+struct WhileStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> body; WhileStmt():Stmt(StmtKind::While){} };
+struct ForStmt : Stmt { StmtPtr init; ExprPtr condition; StmtPtr increment; std::shared_ptr<BlockStmt> body; ForStmt():Stmt(StmtKind::For){} };
+struct ReturnStmt : Stmt { ExprPtr value; ReturnStmt():Stmt(StmtKind::Return){} };
+struct ExprStmt : Stmt { ExprPtr expr; ExprStmt():Stmt(StmtKind::ExprS){} };
+struct ParallelStmt : Stmt { std::vector<std::shared_ptr<BlockStmt>> blocks; ParallelStmt():Stmt(StmtKind::Parallel){} };
 
 // --- DAG / Nodes workflow ---
 
 // Fail(); -- only meaningful inside a Nodes{} node body. Aborts the current
 // attempt of the enclosing node (counts as a failed attempt; retried if the
 // node's OnFail(Retry=N) budget allows).
-struct FailExpr : Expr {};
+struct FailExpr : Expr { FailExpr():Expr(ExprKind::Fail){} };
 
 // One node inside a `Nodes Name { ... }` statement:
 //   NodeName(dep1, dep2, ...) -> OnFail(Retry = N) { body }
@@ -272,13 +334,14 @@ struct NodeDecl {
 struct NodesStmt : Stmt {
     std::string workflowName;
     std::vector<NodeDecl> nodes;
+    NodesStmt():Stmt(StmtKind::Nodes){}
 };
 
 // Throw("message"); -- raises a catchable runtime error carrying a string
 // message. Distinct from Fail(), which stays specific to Nodes{} node
 // bodies and always marks the enclosing node attempt as failed even when
 // caught by a try/catch inside that same body.
-struct ThrowExpr : Expr { ExprPtr messageExpr; };
+struct ThrowExpr : Expr { ExprPtr messageExpr; ThrowExpr():Expr(ExprKind::Throw){} };
 
 // try { ... } catch(var e) { ... } -- generic exception handling. Catches:
 //   - Throw("msg") raised anywhere inside the try block
@@ -287,14 +350,15 @@ struct ThrowExpr : Expr { ExprPtr messageExpr; };
 //     Fail() additionally marks the enclosing Nodes node attempt as failed
 //     for retry purposes -- see CnrThrowSignal/NodeFailSignal handling in
 //     the interpreter)
-// Does NOT catch ReturnSignal (a `return;` inside try still returns from
-// the enclosing function normally).
+// A `return;` inside try still returns from the enclosing function
+// normally, propagated via ExecResult rather than an exception.
 // `catchVarName` is always present syntactically (catch(var e)) and is
 // bound to the error message as a string inside catchBlock.
 struct TryCatchStmt : Stmt {
     std::shared_ptr<BlockStmt> tryBlock;
     std::string catchVarName;
     std::shared_ptr<BlockStmt> catchBlock;
+    TryCatchStmt():Stmt(StmtKind::TryCatch){}
 };
 
 // --- HTTP server AST ---
@@ -304,6 +368,7 @@ struct TryCatchStmt : Stmt {
 // Recognized by the identifier "Server" (soft keyword, like "push"/"header").
 struct ServerConfigExpr : Expr {
     std::vector<std::pair<std::string, ExprPtr>> entries;
+    ServerConfigExpr():Expr(ExprKind::ServerConfig){}
 };
 
 // server.GET("/users/:id") { ...body... };
@@ -315,11 +380,13 @@ struct RouteDeclStmt : Stmt {
     std::string method;
     ExprPtr pathExpr; // usually a StringLitExpr
     std::shared_ptr<BlockStmt> body;
+    RouteDeclStmt():Stmt(StmtKind::RouteDecl){}
 };
 
 // server.start(); -- begins accepting connections (blocking call).
 struct ServerStartStmt : Stmt {
     std::string serverName;
+    ServerStartStmt():Stmt(StmtKind::ServerStart){}
 };
 
 // A call to a builtin "object method" that isn't a plain field or array
@@ -331,6 +398,7 @@ struct ObjectMethodCallExpr : Expr {
     std::string objectName; // "response" (or "request", though it has none yet)
     std::string methodName; // "header" / "cookie" / "redirect"
     std::vector<ExprPtr> args;
+    ObjectMethodCallExpr():Expr(ExprKind::ObjectMethodCall){}
 };
 
 // Data1.encode("key")                -> dataName="Data1", tableName="",       method="encode"
@@ -344,6 +412,7 @@ struct DbMethodCallExpr : Expr {
     std::string tableName; // empty when the call targets the Data object itself (e.g. encode)
     std::string method;
     std::vector<ExprPtr> args;
+    DbMethodCallExpr():Expr(ExprKind::DbMethodCall){}
 };
 
 struct FunctionDecl {
@@ -651,7 +720,7 @@ struct Parser {
         return expr;
     }
     ExprPtr parsePrimary() {
-        if(check(TokType::Number)) { double v = advance().number; return std::make_shared<NumberExpr>(v); }
+        if(check(TokType::Number)) { Token t = advance(); return std::make_shared<NumberExpr>(t.number, t.text); }
         if(match(TokType::TrueKw)) return std::make_shared<BoolExpr>(true);
         if(match(TokType::FalseKw)) return std::make_shared<BoolExpr>(false);
         if(match(TokType::ThreadKw)) {
@@ -707,6 +776,31 @@ struct Parser {
                 auto e = parseUnary();
                 return std::make_shared<StringCastExpr>(e);
             }
+            if(match(TokType::IntKw)) {
+                expect(TokType::RParen,")");
+                return std::make_shared<IntCastExpr>(parseUnary());
+            }
+            if(match(TokType::LongKw)) {
+                expect(TokType::RParen,")");
+                return std::make_shared<LongCastExpr>(parseUnary());
+            }
+            if(match(TokType::FloatKw)) {
+                expect(TokType::RParen,")");
+                return std::make_shared<FloatCastExpr>(parseUnary());
+            }
+            if(match(TokType::BigIntKw)) {
+                expect(TokType::RParen,")");
+                return std::make_shared<BigIntCastExpr>(parseUnary());
+            }
+            if(match(TokType::BigFloatKw)) {
+                ExprPtr precisionExpr;
+                if(match(TokType::LParen)) {
+                    precisionExpr = parseExpression();
+                    expect(TokType::RParen,")");
+                }
+                expect(TokType::RParen,")");
+                return std::make_shared<BigFloatCastExpr>(parseUnary(), precisionExpr);
+            }
             auto e = parseExpression();
             expect(TokType::RParen,")");
             return e;
@@ -756,6 +850,19 @@ struct Parser {
             expect(TokType::RParen,")");
             return t;
         }
+        // BigFloat(N) used standalone (not as a (BigFloat(N))expr cast) --
+        // e.g. `var x = BigFloat(50);` -- builds a zero-valued BigDecimal at
+        // N fractional digits. BigFloat() / BigFloat with no call at all is
+        // handled by the (BigFloat)expr / (BigFloat(N))expr cast forms above;
+        // this covers using BigFloat itself as a value-producing call.
+        if(check(TokType::BigFloatKw) && peek(1).type == TokType::LParen) {
+            advance(); // BigFloat
+            advance(); // (
+            ExprPtr precisionExpr;
+            if(!check(TokType::RParen)) precisionExpr = parseExpression();
+            expect(TokType::RParen,")");
+            return std::make_shared<BigFloatCastExpr>(std::make_shared<NumberExpr>(0.0, "0"), precisionExpr);
+        }
         if(check(TokType::Ident) && peek().text == "Server" && peek(1).type == TokType::LParen) {
             advance(); // Server
             advance(); // (
@@ -792,6 +899,18 @@ struct Parser {
             if(match(TokType::LBracket)) {
                 auto idx = parseExpression();
                 expect(TokType::RBracket,"]");
+                if(check(TokType::LBracket)) {
+                    // Chained index (m[1][0], t[0][1][2], ...) -- a Matrix/
+                    // Tensor access. Collect every [expr] in the chain.
+                    auto ta = std::make_shared<TensorAccessExpr>();
+                    ta->arrayName = name;
+                    ta->indices.push_back(idx);
+                    while(match(TokType::LBracket)) {
+                        ta->indices.push_back(parseExpression());
+                        expect(TokType::RBracket,"]");
+                    }
+                    return ta;
+                }
                 return std::make_shared<ArrayAccessExpr>(name, idx);
             }
             return std::make_shared<VarExpr>(name);
@@ -851,13 +970,61 @@ struct Parser {
         return stmt;
     }
 
+    // Counts and consumes consecutive [] pairs (0 or more), used to detect
+    // Matrix (rank 2, var[][] m) / Tensor (rank 3+, var[][][] t) declarations.
+    // Only bare [] pairs count -- a [expr] is left alone for the caller.
+    int consumeBracketPairs() {
+        int n = 0;
+        while(check(TokType::LBracket) && peek(1).type == TokType::RBracket) {
+            advance(); advance();
+            n++;
+        }
+        return n;
+    }
+
+    // Parses a {...} literal at nesting depth `depth` (depth==1 is the
+    // innermost row of flat scalar expressions; depth>1 is a list of
+    // depth-1 nested literals). Used for var[]...[] = {{...},{...}}.
+    std::shared_ptr<NestedArrayLitExpr> parseNestedArrayLit(int depth) {
+        auto node = std::make_shared<NestedArrayLitExpr>();
+        expect(TokType::LBrace,"{");
+        if(depth <= 1) {
+            node->isLeaf = true;
+            if(!check(TokType::RBrace)) {
+                while(true) {
+                    node->leafValues.push_back(parseExpression());
+                    if(match(TokType::Comma)) continue;
+                    break;
+                }
+            }
+        } else {
+            node->isLeaf = false;
+            if(!check(TokType::RBrace)) {
+                while(true) {
+                    node->children.push_back(parseNestedArrayLit(depth - 1));
+                    if(match(TokType::Comma)) continue;
+                    break;
+                }
+            }
+        }
+        expect(TokType::RBrace,"}");
+        return node;
+    }
+
     StmtPtr parseVarDecl(bool consumeSemicolon = true) {
         expect(TokType::Var,"var");
         auto stmt = std::make_shared<VarDeclStmt>();
         if(check(TokType::LBracket) && peek(1).type == TokType::RBracket) {
-            advance(); advance(); // [ ]
+            int rank = consumeBracketPairs();
             stmt->name = expect(TokType::Ident,"identifier").text;
             stmt->isArray = true;
+            if(rank >= 2) {
+                stmt->tensorRank = rank;
+                expect(TokType::Assign,"=");
+                stmt->nestedInit = parseNestedArrayLit(rank);
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                return stmt;
+            }
             if(match(TokType::Assign)) {
                 if(check(TokType::String)) {
                     stmt->arrayValues = stringToArrayValues(advance().text);
@@ -877,9 +1044,16 @@ struct Parser {
             return stmt;
         }
         stmt->name= expect(TokType::Ident,"identifier").text;
-        if(match(TokType::LBracket)) {
-            expect(TokType::RBracket,"]");
-            stmt->isArray=true;
+        if(check(TokType::LBracket) && peek(1).type == TokType::RBracket) {
+            int rank = consumeBracketPairs();
+            stmt->isArray = true;
+            if(rank >= 2) {
+                stmt->tensorRank = rank;
+                expect(TokType::Assign,"=");
+                stmt->nestedInit = parseNestedArrayLit(rank);
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                return stmt;
+            }
             expect(TokType::Assign,"=");
             if(check(TokType::String)) {
                 stmt->arrayValues = stringToArrayValues(advance().text);
@@ -1057,6 +1231,20 @@ struct Parser {
                 j->handleExpr = std::make_shared<ArrayAccessExpr>(id.text, idx);
                 auto stmt = std::make_shared<ExprStmt>();
                 stmt->expr = j;
+                return stmt;
+            }
+            if(check(TokType::LBracket)) {
+                // Chained index assignment: m[1][0] = v; / t[0][1][2] = v;
+                auto stmt = std::make_shared<ArrayAssignStmt>();
+                stmt->arrayName = id.text;
+                stmt->indices.push_back(idx);
+                while(match(TokType::LBracket)) {
+                    stmt->indices.push_back(parseExpression());
+                    expect(TokType::RBracket,"]");
+                }
+                expect(TokType::Assign,"=");
+                stmt->value=parseExpression();
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
                 return stmt;
             }
             auto stmt= std::make_shared<ArrayAssignStmt>();
@@ -1351,18 +1539,439 @@ struct Parser {
     }
 };
 
-struct Value {
-    bool isArray = false;
-    bool isBool = false;
-    bool isStruct = false;
+// Arbitrary-precision signed integer for the BigInt type. Stored in base 10,
+// little-endian (digits[0] is the units digit) -- simplest to get correct,
+// not the fastest representation, but this language cares about correctness
+// over speed for a feature like this.
+struct BigInt {
+    bool negative = false;
+    std::vector<uint8_t> d; // base-10 digits, little-endian
+
+    BigInt() { d.push_back(0); }
+
+    static BigInt fromInt64(long long v) {
+        BigInt b;
+        b.d.clear();
+        b.negative = v < 0;
+        unsigned long long uv = b.negative ? (unsigned long long)(-(v+1)) + 1 : (unsigned long long)v;
+        if(uv == 0) b.d.push_back(0);
+        while(uv > 0) { b.d.push_back((uint8_t)(uv % 10)); uv /= 10; }
+        if(b.d.empty()) b.d.push_back(0);
+        b.trim();
+        return b;
+    }
+    static BigInt fromString(const std::string& sIn) {
+        BigInt b;
+        b.d.clear();
+        std::string s = sIn;
+        size_t i = 0;
+        if(!s.empty() && (s[0]=='+'||s[0]=='-')) { b.negative = (s[0]=='-'); i = 1; }
+        if(i >= s.size()) throw std::runtime_error("Invalid BigInt literal: '" + sIn + "'");
+        for(char c : s.substr(i)) {
+            if(!std::isdigit((unsigned char)c)) throw std::runtime_error("Invalid BigInt literal: '" + sIn + "'");
+        }
+        for(size_t k = s.size(); k > i; --k) b.d.push_back((uint8_t)(s[k-1]-'0'));
+        b.trim();
+        return b;
+    }
+    void trim() {
+        while(d.size() > 1 && d.back() == 0) d.pop_back();
+        if(d.size()==1 && d[0]==0) negative = false;
+    }
+    bool isZero() const { return d.size()==1 && d[0]==0; }
+    std::string toString() const {
+        std::string s;
+        if(negative && !isZero()) s += '-';
+        for(size_t k = d.size(); k > 0; --k) s += (char)('0' + d[k-1]);
+        return s;
+    }
+    double toDouble() const {
+        double r = 0;
+        for(size_t k = d.size(); k > 0; --k) r = r*10.0 + d[k-1];
+        return negative ? -r : r;
+    }
+    static int cmpAbs(const BigInt& a, const BigInt& b) {
+        if(a.d.size() != b.d.size()) return a.d.size() < b.d.size() ? -1 : 1;
+        for(size_t k = a.d.size(); k > 0; --k) {
+            if(a.d[k-1] != b.d[k-1]) return a.d[k-1] < b.d[k-1] ? -1 : 1;
+        }
+        return 0;
+    }
+    static BigInt addAbs(const BigInt& a, const BigInt& b) {
+        BigInt r; r.d.assign(std::max(a.d.size(),b.d.size())+1, 0);
+        int carry = 0;
+        for(size_t i = 0; i < r.d.size(); ++i) {
+            int s = carry;
+            if(i < a.d.size()) s += a.d[i];
+            if(i < b.d.size()) s += b.d[i];
+            r.d[i] = (uint8_t)(s % 10);
+            carry = s / 10;
+        }
+        r.trim();
+        return r;
+    }
+    static BigInt subAbs(const BigInt& a, const BigInt& b) { // requires |a| >= |b|
+        BigInt r; r.d.assign(a.d.size(), 0);
+        int borrow = 0;
+        for(size_t i = 0; i < a.d.size(); ++i) {
+            int s = a.d[i] - borrow - (i < b.d.size() ? b.d[i] : 0);
+            if(s < 0) { s += 10; borrow = 1; } else borrow = 0;
+            r.d[i] = (uint8_t)s;
+        }
+        r.trim();
+        return r;
+    }
+    BigInt operator-() const { BigInt r = *this; if(!r.isZero()) r.negative = !r.negative; return r; }
+    BigInt operator+(const BigInt& o) const {
+        if(negative == o.negative) { BigInt r = addAbs(*this,o); r.negative = negative; r.trim(); return r; }
+        if(cmpAbs(*this,o) >= 0) { BigInt r = subAbs(*this,o); r.negative = negative; r.trim(); return r; }
+        BigInt r = subAbs(o,*this); r.negative = o.negative; r.trim(); return r;
+    }
+    BigInt operator-(const BigInt& o) const { return *this + (-o); }
+    BigInt operator*(const BigInt& o) const {
+        BigInt r; r.d.assign(d.size()+o.d.size(), 0);
+        for(size_t i = 0; i < d.size(); ++i) {
+            if(d[i]==0) continue;
+            int carry = 0;
+            for(size_t j = 0; j < o.d.size() || carry; ++j) {
+                int cur = r.d[i+j] + carry + (j < o.d.size() ? d[i]*o.d[j] : 0);
+                r.d[i+j] = (uint8_t)(cur % 10);
+                carry = cur / 10;
+            }
+        }
+        r.negative = (negative != o.negative);
+        r.trim();
+        return r;
+    }
+    // Schoolbook long division on decimal digits; returns quotient, writes remainder into rem.
+    static BigInt divModAbs(const BigInt& a, const BigInt& b, BigInt& rem) {
+        if(b.isZero()) throw std::runtime_error("BigInt division by zero");
+        BigInt q; q.d.assign(a.d.size(), 0);
+        BigInt cur; cur.d = {0};
+        for(size_t k = a.d.size(); k > 0; --k) {
+            // cur = cur*10 + a.d[k-1]
+            cur.d.insert(cur.d.begin(), a.d[k-1]);
+            cur.trim();
+            int lo = 0, hi = 9, best = 0;
+            while(lo <= hi) {
+                int mid = (lo+hi)/2;
+                BigInt t = b; t.negative = false;
+                BigInt prod = t * fromInt64(mid);
+                if(cmpAbs(prod, cur) <= 0) { best = mid; lo = mid+1; } else hi = mid-1;
+            }
+            q.d[k-1] = (uint8_t)best;
+            BigInt t = b; t.negative = false;
+            cur = subAbs(cur, t * fromInt64(best));
+        }
+        q.trim();
+        rem = cur; rem.negative = false; rem.trim();
+        return q;
+    }
+    BigInt operator/(const BigInt& o) const {
+        BigInt rem;
+        BigInt q = divModAbs(*this, o, rem);
+        q.negative = (negative != o.negative) && !q.isZero();
+        return q;
+    }
+    BigInt operator%(const BigInt& o) const {
+        BigInt rem;
+        divModAbs(*this, o, rem);
+        rem.negative = negative && !rem.isZero(); // result follows dividend's sign, like C++ %
+        return rem;
+    }
+    bool operator==(const BigInt& o) const { return negative==o.negative && d==o.d; }
+    bool operator<(const BigInt& o) const {
+        if(negative != o.negative) return negative;
+        int c = cmpAbs(*this,o);
+        return negative ? c > 0 : c < 0;
+    }
+    bool operator<=(const BigInt& o) const { return *this < o || *this == o; }
+    bool operator>(const BigInt& o) const { return o < *this; }
+    bool operator>=(const BigInt& o) const { return o <= *this; }
+};
+
+// Real, arbitrary-precision BigDecimal: exact decimal arithmetic (no binary
+// rounding at all) backed by a BigInt mantissa plus a decimal exponent, and
+// carrying its own working precision (how many fractional digits it keeps
+// after divide/sqrt/transcendental ops -- multiply/add/sub stay exact up to
+// `scale`). `scale`/`precision` are settable per-value via BigFloat(N) (max
+// 1000 digits); BigFloat with no argument defaults to 22 fractional digits,
+// which is also where the named constants (pi/e/phi/psi) live.
+static const int CNR_BIGDEC_MAX_SCALE = 1000;
+static const int CNR_BIGDEC_DEFAULT_SCALE = 22;
+
+struct BigDecimal {
+    // Value == mantissa * 10^-scale (mantissa is an exact BigInt integer).
+    BigInt mantissa;
+    int scale = CNR_BIGDEC_DEFAULT_SCALE; // fractional digits kept in `mantissa`
+    int precision = CNR_BIGDEC_DEFAULT_SCALE; // working precision for this value (BigFloat(N))
+
+    BigDecimal() { mantissa = BigInt::fromInt64(0); }
+
+    static int clampPrecision(int p) {
+        if(p < 0) p = 0;
+        if(p > CNR_BIGDEC_MAX_SCALE) p = CNR_BIGDEC_MAX_SCALE;
+        return p;
+    }
+
+    static BigInt pow10(int n) {
+        BigInt r = BigInt::fromInt64(1);
+        BigInt ten = BigInt::fromInt64(10);
+        for(int i=0;i<n;++i) r = r * ten;
+        return r;
+    }
+
+    static BigInt rescaleUp(const BigInt& mant, int fromScale, int toScale) {
+        if(toScale <= fromScale) return mant;
+        return mant * pow10(toScale - fromScale);
+    }
+
+    // Builds a BigDecimal from a long double. A long double's *exact* value
+    // (its binary fraction) has far more decimal digits than are actually
+    // meaningful -- but naively multiplying by 10 `scale` times accumulates
+    // floating-point rounding error at every single multiplication, which
+    // silently manufactures garbage digits from roughly the 17th digit
+    // onward. Instead we ask the C library for the long double's own decimal
+    // expansion once, with %.*Lf (correctly rounded by the libc printf
+    // implementation), and pad the remainder with zeros -- so only the
+    // ~18-19 digits a long double actually carries are trusted; anything
+    // beyond that is explicit, honest zero-padding rather than fabricated
+    // noise. This matters most for iterative algorithms like Newton's-method
+    // sqrt, which need every digit of the seed value to be trustworthy.
+    static BigDecimal fromLongDouble(long double v, int precision) {
+        BigDecimal r;
+        r.precision = clampPrecision(precision);
+        char buf[1200];
+        // 20 fractional digits comfortably covers a long double's real
+        // precision (~18-19 significant decimal digits) without over-claiming.
+        int fracDigits = std::min(r.precision, 20);
+        snprintf(buf, sizeof(buf), "%.*Lf", fracDigits, v);
+        return fromString(std::string(buf), r.precision);
+    }
+
+    // Parse a decimal literal string like "123.456" or "-0.5" at the given precision.
+    static BigDecimal fromString(const std::string& sIn, int precision) {
+        BigDecimal r;
+        r.precision = clampPrecision(precision);
+        std::string s = sIn;
+        bool neg = false;
+        size_t i = 0;
+        if(!s.empty() && (s[0]=='+'||s[0]=='-')) { neg = (s[0]=='-'); i = 1; }
+        std::string intPart, fracPart;
+        size_t dot = s.find('.', i);
+        if(dot == std::string::npos) {
+            intPart = s.substr(i);
+        } else {
+            intPart = s.substr(i, dot - i);
+            fracPart = s.substr(dot+1);
+        }
+        if(intPart.empty()) intPart = "0";
+        int fracLen = (int)fracPart.size();
+        r.scale = std::max(r.precision, fracLen);
+        std::string digits = intPart + fracPart;
+        for(int k=0; k < r.scale - fracLen; ++k) digits += '0';
+        r.mantissa = BigInt::fromString(digits);
+        r.mantissa.negative = neg && !r.mantissa.isZero();
+        return r;
+    }
+
+    bool isZero() const { return mantissa.isZero(); }
+    bool isNegative() const { return mantissa.negative; }
+
+    std::string toString() const {
+        BigInt m = mantissa;
+        bool neg = m.negative;
+        m.negative = false;
+        std::string digits = m.toString();
+        if((int)digits.size() <= scale) digits = std::string(scale - digits.size() + 1, '0') + digits;
+        std::string intPart = digits.substr(0, digits.size() - scale);
+        std::string fracPart = scale > 0 ? digits.substr(digits.size() - scale) : "";
+        // Trim trailing zeros in the fractional part for display, but keep
+        // at least one digit if there is a fractional part at all.
+        if(!fracPart.empty()) {
+            size_t last = fracPart.find_last_not_of('0');
+            fracPart = (last == std::string::npos) ? "" : fracPart.substr(0, last+1);
+        }
+        std::string out = intPart;
+        if(!fracPart.empty()) out += "." + fracPart;
+        if(neg && (intPart != "0" || !fracPart.empty())) out = "-" + out;
+        return out;
+    }
+
+    long double toLongDouble() const {
+        std::string s = toString();
+        return strtold(s.c_str(), nullptr);
+    }
+
+    static void align(const BigDecimal& a, const BigDecimal& b, BigInt& am, BigInt& bm, int& outScale) {
+        outScale = std::max(a.scale, b.scale);
+        am = rescaleUp(a.mantissa, a.scale, outScale);
+        bm = rescaleUp(b.mantissa, b.scale, outScale);
+    }
+
+    BigDecimal add(const BigDecimal& o) const {
+        BigDecimal r; BigInt am, bm; int sc;
+        align(*this, o, am, bm, sc);
+        r.mantissa = am + bm;
+        r.scale = sc;
+        r.precision = std::max(precision, o.precision);
+        return r;
+    }
+    BigDecimal sub(const BigDecimal& o) const {
+        BigDecimal r; BigInt am, bm; int sc;
+        align(*this, o, am, bm, sc);
+        r.mantissa = am - bm;
+        r.scale = sc;
+        r.precision = std::max(precision, o.precision);
+        return r;
+    }
+    BigDecimal mul(const BigDecimal& o) const {
+        BigDecimal r;
+        r.mantissa = mantissa * o.mantissa;
+        r.scale = scale + o.scale;
+        r.precision = std::max(precision, o.precision);
+        r.roundToPrecision(r.precision);
+        return r;
+    }
+    // Long division carried out to `precision` fractional digits.
+    BigDecimal div(const BigDecimal& o) const {
+        if(o.isZero()) throw std::runtime_error("Division by zero");
+        int p = std::max(precision, o.precision);
+        BigDecimal r;
+        r.precision = p;
+        r.scale = p;
+        // (mantissa / 10^scale) / (o.mantissa / 10^o.scale)
+        //   = mantissa * 10^(o.scale - scale + p) / o.mantissa, truncated at scale p
+        int shift = o.scale - scale + p;
+        BigInt num = mantissa;
+        if(shift >= 0) num = num * pow10(shift);
+        BigInt den = o.mantissa;
+        den.negative = false;
+        BigInt numAbs = num; numAbs.negative = false;
+        if(shift < 0) den = den * pow10(-shift);
+        BigInt rem;
+        BigInt q = BigInt::divModAbs(numAbs, den, rem);
+        q.negative = (mantissa.negative != o.mantissa.negative) && !q.isZero();
+        r.mantissa = q;
+        return r;
+    }
+    BigDecimal mod(const BigDecimal& o) const {
+        if(o.isZero()) throw std::runtime_error("Modulo by zero");
+        // a % b == a - trunc(a/b)*b, matching C's fmod-style truncation semantics.
+        BigDecimal q = this->div(o);
+        BigDecimal qTrunc = q.truncatedToInteger();
+        BigDecimal prod = qTrunc.mul(o);
+        BigDecimal r = this->sub(prod);
+        return r;
+    }
+    BigDecimal truncatedToInteger() const {
+        BigDecimal r;
+        r.precision = precision;
+        r.scale = scale;
+        BigInt m = mantissa; m.negative = false;
+        std::string digits = m.toString();
+        if((int)digits.size() <= scale) { r.mantissa = BigInt::fromInt64(0); return r; }
+        std::string intPart = digits.substr(0, digits.size()-scale);
+        BigInt truncMant = BigInt::fromString(intPart) * pow10(scale);
+        truncMant.negative = mantissa.negative && !truncMant.isZero();
+        r.mantissa = truncMant;
+        return r;
+    }
+    void roundToPrecision(int p) {
+        if(scale <= p) return;
+        int drop = scale - p;
+        BigInt divisor = pow10(drop);
+        BigInt rem;
+        BigInt m = mantissa; bool neg = m.negative; m.negative = false;
+        BigInt q = BigInt::divModAbs(m, divisor, rem);
+        // round half up
+        BigInt twiceRem = rem + rem;
+        if(BigInt::cmpAbs(twiceRem, divisor) >= 0) q = q + BigInt::fromInt64(1);
+        q.negative = neg && !q.isZero();
+        mantissa = q;
+        scale = p;
+    }
+    BigDecimal negate() const {
+        BigDecimal r = *this;
+        if(!r.isZero()) r.mantissa.negative = !r.mantissa.negative;
+        return r;
+    }
+    BigDecimal abs() const {
+        BigDecimal r = *this;
+        r.mantissa.negative = false;
+        return r;
+    }
+    static int compare(const BigDecimal& a, const BigDecimal& b) {
+        BigInt am, bm; int sc;
+        align(a, b, am, bm, sc);
+        if(am == bm) return 0;
+        return am < bm ? -1 : 1;
+    }
+    bool isIntegerValued() const {
+        BigInt m = mantissa; m.negative = false;
+        std::string digits = m.toString();
+        if((int)digits.size() <= scale) return digits.find_first_not_of('0') == std::string::npos;
+        std::string frac = digits.substr(digits.size()-scale);
+        return frac.find_first_not_of('0') == std::string::npos;
+    }
+    // Newton's method square root at `precision` fractional digits.
+    BigDecimal sqrtNewton() const {
+        if(isNegative()) throw std::runtime_error("sqrt(): cannot take the square root of a negative number");
+        if(isZero()) return *this;
+        int p = precision;
+        int workScale = p + 15; // guard digits, absorbs rounding noise from intermediate divisions
+        long double approx = std::sqrt((double)toLongDouble());
+        if(approx <= 0) approx = 1.0L;
+        BigDecimal x = BigDecimal::fromLongDouble(approx, workScale);
+        BigDecimal self = *this; self.precision = workScale;
+        BigDecimal two = BigDecimal::fromLongDouble(2.0L, workScale);
+        // Newton's method roughly doubles the number of correct digits each
+        // iteration. The initial guess (from a double) has ~15 correct
+        // digits, so ceil(log2(workScale/15)) + a few extra passes is always
+        // enough to converge fully to workScale digits, however large p is.
+        int neededIters = 8;
+        {
+            int correct = 15;
+            while(correct < workScale) { correct *= 2; neededIters++; }
+        }
+        for(int iter=0; iter<neededIters; ++iter) {
+            BigDecimal quotient = self.div(x);
+            quotient.precision = workScale;
+            BigDecimal sum = x.add(quotient);
+            sum.precision = workScale;
+            BigDecimal next = sum.div(two);
+            next.precision = workScale;
+            next.roundToPrecision(workScale);
+            if(BigDecimal::compare(next, x) == 0) { x = next; break; }
+            x = next;
+        }
+        x.precision = p;
+        x.roundToPrecision(p);
+        return x;
+    }
+};
+
+// Which numeric flavor a Value currently holds. Plain is the language's
+// original, untyped double -- everything old keeps working exactly as
+// before. The others are opt-in via (Int)/(long)/(Float)/(BigInt)/(BigFloat)
+// casts and propagate through arithmetic (see numericBinaryOp).
+enum class NumKind { Plain, F32, I32, I64, BigF, Big };
+
+// ---- Gargalo #2 fix: cold/rarely-used Value data lives here, allocated
+// lazily (only the first time it's actually needed). Structs, plain
+// objects, matrices/tensors stay on Value directly (they're common in
+// everyday CnR programs), but the "exotic" kinds -- server/database
+// handles, typed-object maps, big-number backing -- are used by only a
+// small fraction of Values in most programs (e.g. a pure-arithmetic
+// script never touches any of them). Before this change every single
+// Value paid for 7 shared_ptr members + 1 std::string unconditionally on
+// every construction/copy/move/destruction; now the common case (plain
+// number/bool/string/array) carries just one null shared_ptr for all of
+// them combined.
+struct Value; // forward declaration: ValueExtra holds containers of Value
+
+struct ValueExtra {
     bool isThread = false;
-    bool isString = false;
-    bool isObject = false;
-    bool isNull = false;
-    double number = 0;
-    bool boolean = false;
-    std::string str;
-    std::vector<double> array;
     std::string structType;
     std::shared_ptr<std::unordered_map<std::string, Value>> fields;
     std::shared_ptr<std::unordered_map<std::string, Value>> object;
@@ -1373,22 +1982,141 @@ struct Value {
     bool isLenientMap = false; // true for request.query/.params/.header/.cookie: missing key -> "" instead of throwing
     bool isDatabase = false;
     std::shared_ptr<struct DatabaseInstance> database;
+    std::shared_ptr<BigDecimal> bigDec;
+    std::shared_ptr<BigInt> big;
+};
+
+struct Value {
+    bool isArray = false;
+    bool isBool = false;
+    bool isStruct = false;
+    bool isString = false;
+    bool isObject = false;
+    bool isNull = false;
+    double number = 0;
+    bool boolean = false;
+    std::string str;
+    std::vector<double> array;
+
+    // Matrix/Tensor shape: empty means this is a plain 1-D array (existing
+    // behavior, unchanged). A non-empty dims (size>=2) means `array` holds
+    // dims[0]*dims[1]*...*dims[n-1] elements in row-major order -- e.g.
+    // dims=={2,3} is a 2x3 matrix, dims=={2,2,2} is a 2x2x2 tensor.
+    std::vector<int> dims;
+
+    // Typed-numeric extension: numKind==Plain means "number" holds the value
+    // exactly as before (untyped double), so every existing var/expr keeps
+    // working unchanged. Int/long live in i64 (exact); BigInt lives in big
+    // (exact, unbounded); Float/BigFloat live in number/bigFlt respectively
+    // (rounded through float / long double precision).
+    NumKind numKind = NumKind::Plain;
+    long long i64 = 0;
+
+    // Lazily-allocated cold data (see ValueExtra above). ex() allocates on
+    // first use (call at write sites); cex() never allocates, so pure
+    // reads on a Value that never touched any of these fields stay free --
+    // they just see the "all defaults" state.
+    std::shared_ptr<ValueExtra> extra;
+    ValueExtra& ex() { if (!extra) extra = std::make_shared<ValueExtra>(); return *extra; }
+    const ValueExtra& cex() const { static const ValueExtra kEmptyExtra{}; return extra ? *extra : kEmptyExtra; }
 
     static Value makeString(std::string s) { Value v; v.isString = true; v.str = std::move(s); return v; }
     static Value makeNull() { Value v; v.isNull = true; return v; }
-    static Value makeObject() { Value v; v.isObject = true; v.object = std::make_shared<std::unordered_map<std::string, Value>>(); return v; }
-    static Value makeObjectArray() { Value v; v.isObject = true; v.isObjectArray = true; v.objectArray = std::make_shared<std::vector<Value>>(); return v; }
+    static Value makeObject() { Value v; v.isObject = true; v.ex().object = std::make_shared<std::unordered_map<std::string, Value>>(); return v; }
+    static Value makeObjectArray() { Value v; v.isObject = true; v.ex().isObjectArray = true; v.ex().objectArray = std::make_shared<std::vector<Value>>(); return v; }
     static Value makeBool2(bool b) { Value v; v.isBool = true; v.boolean = b; return v; }
 };
+
+// ---- Matrix/Tensor helpers (row-major flat storage in Value::array) ----
+
+// Total element count for a given shape (product of all dimensions).
+int tensorElementCount(const std::vector<int>& dims) {
+    int total = 1;
+    for(int d : dims) total *= d;
+    return total;
+}
+
+// Row-major flat offset for a full index (one int per dimension).
+int tensorFlatOffset(const std::vector<int>& dims, const std::vector<int>& idx) {
+    int offset = 0;
+    for(size_t i = 0; i < dims.size(); ++i) {
+        offset = offset * dims[i] + idx[i];
+    }
+    return offset;
+}
+
+// Extracts the sub-tensor at a partial index (fewer indices than dims),
+// e.g. slicing row `i` out of a matrix, or a 2-D slice out of a 3-D tensor.
+// Returns a new Value with dims trimmed to the remaining dimensions.
+Value tensorSlice(const Value& src, const std::vector<int>& idx) {
+    if(idx.size() > src.dims.size())
+        throw std::runtime_error("Too many indices for tensor (has " + std::to_string(src.dims.size()) + " dimension(s))");
+    std::vector<int> subDims(src.dims.begin() + idx.size(), src.dims.end());
+    int subSize = tensorElementCount(subDims);
+    std::vector<int> fullPrefix = idx;
+    fullPrefix.resize(src.dims.size(), 0);
+    int startOffset = tensorFlatOffset(src.dims, fullPrefix);
+    Value out;
+    out.isArray = true;
+    out.dims = subDims;
+    if(subDims.empty()) {
+        // Fully indexed: a single scalar. Callers that need a scalar use
+        // out.array[0] rather than this Value directly.
+        out.array.assign(1, src.array[startOffset]);
+    } else {
+        out.array.assign(src.array.begin() + startOffset, src.array.begin() + startOffset + subSize);
+    }
+    return out;
+}
+
+// Writes a scalar into a tensor at a full index (one int per dimension).
+void tensorSetScalar(Value& v, const std::vector<int>& idx, double scalar) {
+    if(idx.size() != v.dims.size())
+        throw std::runtime_error("Tensor assignment requires " + std::to_string(v.dims.size()) + " index/indices, got " + std::to_string(idx.size()));
+    for(size_t i = 0; i < idx.size(); ++i) {
+        if(idx[i] < 0 || idx[i] >= v.dims[i])
+            throw std::runtime_error("Tensor index out of bounds at dimension " + std::to_string(i) + ": " + std::to_string(idx[i]));
+    }
+    v.array[tensorFlatOffset(v.dims, idx)] = scalar;
+}
+
+// Formats a Matrix/Tensor Value as nested brackets matching its shape, e.g.
+// a 2x2 matrix prints as [[1,2],[3,4]].
+void tensorToDisplayInto(std::ostringstream& oss, const std::vector<int>& dims, const double* data, size_t& cursor) {
+    if(dims.empty()) {
+        double d = data[cursor++];
+        if(d == (long long)d) oss << (long long)d; else oss << d;
+        return;
+    }
+    oss << '[';
+    std::vector<int> innerDims(dims.begin() + 1, dims.end());
+    for(int i = 0; i < dims[0]; ++i) {
+        if(i > 0) oss << ',';
+        tensorToDisplayInto(oss, innerDims, data, cursor);
+    }
+    oss << ']';
+}
+std::string tensorToDisplayString(const Value& v) {
+    std::ostringstream oss;
+    size_t cursor = 0;
+    tensorToDisplayInto(oss, v.dims, v.array.data(), cursor);
+    return oss.str();
+}
 
 std::string valueToDisplayString(const Value& v) {
     if(v.isNull) return "null";
     if(v.isString) return v.str;
     if(v.isBool) return v.boolean ? "true" : "false";
-    if(v.isObject) return v.isObjectArray ? "[array]" : "[object]";
-    if(v.isStruct) return "[struct " + v.structType + "]";
-    if(v.isDatabase) return "[database]";
+    if(v.isObject) return v.cex().isObjectArray ? "[array]" : "[object]";
+    if(v.isStruct) return "[struct " + v.cex().structType + "]";
+    if(v.cex().isDatabase) return "[database]";
+    if(v.isArray && !v.dims.empty()) return tensorToDisplayString(v);
     if(v.isArray) return "[array]";
+    if(v.numKind == NumKind::Big) return v.cex().big ? v.cex().big->toString() : "0";
+    if(v.numKind == NumKind::I32 || v.numKind == NumKind::I64) return std::to_string(v.i64);
+    if(v.numKind == NumKind::BigF) {
+        return v.cex().bigDec ? v.cex().bigDec->toString() : "0";
+    }
     std::ostringstream oss;
     if(v.number == (long long)v.number) oss << (long long)v.number;
     else oss << v.number;
@@ -1421,12 +2149,498 @@ bool valuesEqual(const Value& a, const Value& b) {
     if(a.isNull || b.isNull) {
         return a.isNull && b.isNull;
     }
-    double av = a.isBool ? (a.boolean ? 1.0 : 0.0) : a.number;
-    double bv = b.isBool ? (b.boolean ? 1.0 : 0.0) : b.number;
+    if(a.isBool || b.isBool) {
+        double av = a.isBool ? (a.boolean ? 1.0 : 0.0) : a.number;
+        double bv = b.isBool ? (b.boolean ? 1.0 : 0.0) : b.number;
+        return av == bv;
+    }
+    if(a.numKind == NumKind::Big || b.numKind == NumKind::Big) {
+        BigInt av = a.numKind == NumKind::Big ? *a.cex().big : BigInt::fromInt64((long long)a.number);
+        BigInt bv = b.numKind == NumKind::Big ? *b.cex().big : BigInt::fromInt64((long long)b.number);
+        return av == bv;
+    }
+    if(a.numKind == NumKind::BigF || b.numKind == NumKind::BigF) {
+        BigDecimal av = a.numKind == NumKind::BigF ? *a.cex().bigDec : BigDecimal::fromLongDouble((long double)a.number, CNR_BIGDEC_DEFAULT_SCALE);
+        BigDecimal bv = b.numKind == NumKind::BigF ? *b.cex().bigDec : BigDecimal::fromLongDouble((long double)b.number, CNR_BIGDEC_DEFAULT_SCALE);
+        return BigDecimal::compare(av, bv) == 0;
+    }
+    if((a.numKind == NumKind::I32 || a.numKind == NumKind::I64) &&
+       (b.numKind == NumKind::I32 || b.numKind == NumKind::I64)) {
+        return a.i64 == b.i64;
+    }
+    double av = a.number;
+    double bv = b.number;
     return av == bv;
 }
 
-struct ReturnSignal { Value value; };
+// ---- Typed-numeric helpers (Int/long/BigInt/Float/BigFloat) ----
+// Every factory below also mirrors the value into the legacy `number` field
+// so that all the pre-existing double-based code paths in this interpreter
+// (array indices, http bodies, etc.) keep working when handed a typed value.
+Value makeIntValue(long long v, bool wide) {
+    Value r;
+    r.numKind = wide ? NumKind::I64 : NumKind::I32;
+    r.i64 = wide ? v : (long long)(int32_t)v;
+    r.number = (double)r.i64;
+    return r;
+}
+Value makeFloatValue(double v) {
+    Value r;
+    r.numKind = NumKind::F32;
+    r.number = (double)(float)v;
+    return r;
+}
+Value makeBigValue(BigInt v) {
+    Value r;
+    r.numKind = NumKind::Big;
+    r.ex().big = std::make_shared<BigInt>(std::move(v));
+    r.number = r.cex().big->toDouble();
+    return r;
+}
+Value makeBigFloatValue(BigDecimal v) {
+    Value r;
+    r.numKind = NumKind::BigF;
+    r.ex().bigDec = std::make_shared<BigDecimal>(std::move(v));
+    r.number = (double)r.cex().bigDec->toLongDouble();
+    return r;
+}
+// Compatibility overload: builds a BigDecimal at the default (22-digit)
+// precision from a long double -- used by call sites that only have a
+// machine-precision intermediate result (e.g. std::sqrt/std::sin fallbacks).
+Value makeBigFloatValue(long double v) {
+    return makeBigFloatValue(BigDecimal::fromLongDouble(v, CNR_BIGDEC_DEFAULT_SCALE));
+}
+// Builds a BigDecimal at a specific precision -- used by BigFloat(N) casts
+// and literals so the requested number of digits (up to 1000) is honored.
+Value makeBigFloatValue(long double v, int precision) {
+    return makeBigFloatValue(BigDecimal::fromLongDouble(v, precision));
+}
+Value makePlainNumber(double v) { Value r; r.number = v; return r; }
+
+// Named math constants, given here to 1000 significant fractional digits so
+// that BigFloat(N) for any N up to 1000 can slice out an exact prefix instead
+// of re-deriving them at runtime. Stored as decimal-string literals and
+// parsed into a BigDecimal at whatever precision is requested (default 22,
+// which is where `pi`/`e`/`phi`/`psi` live when used unqualified).
+const char* CNR_PI_DIGITS =
+"3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196"
+"4428810975665933446128475648233786783165271201909145648566923460348610454326648213393607260249141273724587006606315588174881520920962829254091715364367892590360011330530548820466521384146951941511609";
+const char* CNR_E_DIGITS =
+"2.71828182845904523536028747135266249775724709369995957496696762772407663035354759457138217852516642742746639193200305992181741359662904357290033429526059563073813232862794349076323382988075319525101"
+"9011573834187930702154089149934884167509244761460668082264800168477411853742345442437107539077744992069551702761838606261331384583000752044933826560297606737113200709328709127443747047230696977209310";
+const char* CNR_PHI_DIGITS = // golden ratio (1+sqrt5)/2
+"1.61803398874989484820458683436563811772030917980576286213544862270526046281890244970720720418939113748475408807538689175212663386222353693179318006076672635443338908659593958290563832266131992829026788"
+"0675208429328856889398872842471309796739001248531447477074391088947627773217772210532032069658335980999479864530392936089192421778062772653830098980338956095050923751881108102679558728752778566118821454";
+const char* CNR_PSI_DIGITS = // golden ratio conjugate (1-sqrt5)/2, i.e. 1 - phi
+"-0.61803398874989484820458683436563811772030917980576286213544862270526046281890244970720720418939113748475408807538689175212663386222353693179318006076672635443338908659593958290563832266131992829026788"
+"0675208429328856889398872842471309796739001248531447477074391088947627773217772210532032069658335980999479864530392936089192421778062772653830098980338956095050923751881108102679558728752778566118821454";
+
+BigDecimal cnrConstantAtPrecision(const char* fullDigits, int precision) {
+    int p = BigDecimal::clampPrecision(precision);
+    std::string s(fullDigits);
+    size_t dot = s.find('.');
+    // fullDigits has (dot+1 .. end) fractional digits available; if the
+    // caller asks for more than we've hardcoded, just hand back what we have
+    // (still far beyond double precision) rather than fabricating digits.
+    size_t maxFrac = s.size() - dot - 1;
+    size_t want = std::min((size_t)p, maxFrac);
+    std::string truncated = s.substr(0, dot + 1 + want);
+    return BigDecimal::fromString(truncated, p);
+}
+bool valueIsIntegral(const Value& v) {
+    if(v.isBool) return true;
+    switch(v.numKind) {
+        case NumKind::Big: case NumKind::I32: case NumKind::I64: return true;
+        case NumKind::BigF: return v.cex().bigDec ? v.cex().bigDec->isIntegerValued() : true;
+        default: return v.number == std::floor(v.number);
+    }
+}
+long long valueToI64(const Value& v) {
+    if(v.isBool) return v.boolean ? 1 : 0;
+    switch(v.numKind) {
+        case NumKind::I32: case NumKind::I64: return v.i64;
+        case NumKind::Big: return (long long)v.cex().big->toDouble();
+        case NumKind::BigF: return v.cex().bigDec ? (long long)v.cex().bigDec->toLongDouble() : 0;
+        default: return (long long)v.number;
+    }
+}
+long double valueToLongDouble(const Value& v) {
+    if(v.isBool) return v.boolean ? 1.0L : 0.0L;
+    switch(v.numKind) {
+        case NumKind::BigF: return v.cex().bigDec ? v.cex().bigDec->toLongDouble() : 0.0L;
+        case NumKind::Big: return (long double)v.cex().big->toDouble();
+        case NumKind::I32: case NumKind::I64: return (long double)v.i64;
+        default: return (long double)v.number;
+    }
+}
+BigInt valueToBigInt(const Value& v) {
+    if(v.numKind == NumKind::Big) return *v.cex().big;
+    if(!valueIsIntegral(v))
+        throw std::runtime_error("Cannot use a non-integer value as BigInt -- cast to BigFloat instead");
+    if(v.numKind == NumKind::I32 || v.numKind == NumKind::I64) return BigInt::fromInt64(v.i64);
+    if(v.numKind == NumKind::BigF && v.cex().bigDec) {
+        BigInt rem;
+        BigInt m = v.cex().bigDec->mantissa; bool neg = m.negative; m.negative = false;
+        BigInt divisor = BigDecimal::pow10(v.cex().bigDec->scale);
+        BigInt q = BigInt::divModAbs(m, divisor, rem); // exact since valueIsIntegral was checked above
+        q.negative = neg && !q.isZero();
+        return q;
+    }
+    return BigInt::fromInt64((long long)v.number);
+}
+// Working precision to use when a value needs to be brought into the
+// BigDecimal domain for a mixed-kind operation: an existing BigFloat keeps
+// its own precision; anything else falls back to the 22-digit default.
+int valuePrecisionOrDefault(const Value& v) {
+    return (v.numKind == NumKind::BigF && v.cex().bigDec) ? v.cex().bigDec->precision : CNR_BIGDEC_DEFAULT_SCALE;
+}
+// Converts any Value into an exact BigDecimal at the given precision. Used
+// whenever an operation must run in the BigDecimal domain (arithmetic,
+// comparisons, math builtins) so mixing e.g. a plain int literal with a
+// BigFloat(500) doesn't get flattened down to double precision first.
+BigDecimal valueToBigDecimal(const Value& v, int precision) {
+    if(v.numKind == NumKind::BigF && v.cex().bigDec) {
+        BigDecimal r = *v.cex().bigDec;
+        r.precision = BigDecimal::clampPrecision(precision);
+        return r;
+    }
+    if(v.numKind == NumKind::Big && v.cex().big) {
+        BigDecimal r;
+        r.precision = BigDecimal::clampPrecision(precision);
+        r.scale = 0;
+        r.mantissa = *v.cex().big;
+        return r;
+    }
+    if(v.isBool) return BigDecimal::fromLongDouble(v.boolean ? 1.0L : 0.0L, precision);
+    if(v.numKind == NumKind::I32 || v.numKind == NumKind::I64)
+        return BigDecimal::fromLongDouble((long double)v.i64, precision);
+    return BigDecimal::fromLongDouble((long double)v.number, precision);
+}
+// Ranks which numeric domain an arithmetic op should run in when the two
+// operands don't match: BigInt beats everything (exact), then BigFloat
+// (long double), then 64-bit int, then 32-bit int, then Float, then the
+// original untyped double -- so mixing a typed value with a plain number
+// promotes to the typed side instead of silently truncating it.
+int numKindRank(NumKind k) {
+    switch(k) {
+        case NumKind::Big: return 5;
+        case NumKind::BigF: return 4;
+        case NumKind::I64: return 3;
+        case NumKind::I32: return 2;
+        case NumKind::F32: return 1;
+        default: return 0;
+    }
+}
+
+double valueToApproxDouble(const Value& v) {
+    if(v.isBool) return v.boolean ? 1.0 : 0.0;
+    switch(v.numKind) {
+        case NumKind::Big: return v.cex().big->toDouble();
+        case NumKind::BigF: return v.cex().bigDec ? (double)v.cex().bigDec->toLongDouble() : 0.0;
+        case NumKind::I32: case NumKind::I64: return (double)v.i64;
+        default: return v.number;
+    }
+}
+
+// -1/0/1, comparing in whichever domain the higher-ranked operand needs.
+int numericCompare(const Value& L, const Value& R) {
+    NumKind kind = numKindRank(L.numKind) >= numKindRank(R.numKind) ? L.numKind : R.numKind;
+    if(kind == NumKind::Big && valueIsIntegral(L) && valueIsIntegral(R)) {
+        BigInt a = valueToBigInt(L), b = valueToBigInt(R);
+        if(a < b) return -1; if(b < a) return 1; return 0;
+    }
+    if(kind == NumKind::Big || kind == NumKind::BigF) {
+        int p = std::max(valuePrecisionOrDefault(L), valuePrecisionOrDefault(R));
+        BigDecimal a = valueToBigDecimal(L, p), b = valueToBigDecimal(R, p);
+        return BigDecimal::compare(a, b);
+    }
+    if(kind == NumKind::I64 || kind == NumKind::I32) {
+        long long a = valueToI64(L), b = valueToI64(R);
+        if(a < b) return -1; if(a > b) return 1; return 0;
+    }
+    double a = L.isBool ? (L.boolean?1.0:0.0) : L.number;
+    double b = R.isBool ? (R.boolean?1.0:0.0) : R.number;
+    if(a < b) return -1; if(a > b) return 1; return 0;
+}
+
+// +,-,*,/,% across mixed numeric kinds. The result's kind is the highest-
+// ranked domain involved (see numKindRank), so e.g. Int + BigInt = BigInt,
+// and an untagged literal mixed with a typed value is promoted rather than
+// silently truncating the typed side.
+Value numericBinaryOp(TokType op, const Value& L, const Value& R) {
+    // String concatenation: "a" + "b", or "count: " + 5, or 5 + " items"
+    // (either side may be a string -- the non-string side is stringified the
+    // same way print() would display it). Only '+' does this; other
+    // operators on a string operand fall through to the numeric paths below
+    // and error out naturally (a string has no numeric value).
+    if(op == TokType::Plus && (L.isString || R.isString)) {
+        return Value::makeString(valueToDisplayString(L) + valueToDisplayString(R));
+    }
+    NumKind kind = numKindRank(L.numKind) >= numKindRank(R.numKind) ? L.numKind : R.numKind;
+    if(kind == NumKind::Big && valueIsIntegral(L) && valueIsIntegral(R)) {
+        BigInt a = valueToBigInt(L), b = valueToBigInt(R);
+        switch(op) {
+        case TokType::Plus: return makeBigValue(a + b);
+        case TokType::Minus: return makeBigValue(a - b);
+        case TokType::Star: return makeBigValue(a * b);
+        case TokType::Slash:
+            if(b.isZero()) throw std::runtime_error("Division by zero");
+            return makeBigValue(a / b);
+        case TokType::Percent:
+            if(b.isZero()) throw std::runtime_error("Modulo by zero");
+            return makeBigValue(a % b);
+        default: throw std::runtime_error("Unsupported BigInt operator");
+        }
+    }
+    if(kind == NumKind::Big || kind == NumKind::BigF) {
+        int p = std::max(valuePrecisionOrDefault(L), valuePrecisionOrDefault(R));
+        BigDecimal a = valueToBigDecimal(L, p), b = valueToBigDecimal(R, p);
+        switch(op) {
+        case TokType::Plus: return makeBigFloatValue(a.add(b));
+        case TokType::Minus: return makeBigFloatValue(a.sub(b));
+        case TokType::Star: return makeBigFloatValue(a.mul(b));
+        case TokType::Slash:
+            if(b.isZero()) throw std::runtime_error("Division by zero");
+            return makeBigFloatValue(a.div(b));
+        case TokType::Percent:
+            if(b.isZero()) throw std::runtime_error("Modulo by zero");
+            return makeBigFloatValue(a.mod(b));
+        default: throw std::runtime_error("Unsupported BigFloat operator");
+        }
+    }
+    if(kind == NumKind::I64 || kind == NumKind::I32) {
+        long long a = valueToI64(L), b = valueToI64(R);
+        bool wide = (kind == NumKind::I64);
+        switch(op) {
+        case TokType::Plus: return makeIntValue(a + b, wide);
+        case TokType::Minus: return makeIntValue(a - b, wide);
+        case TokType::Star: return makeIntValue(a * b, wide);
+        case TokType::Slash:
+            if(b == 0) throw std::runtime_error("Division by zero");
+            return makeIntValue(a / b, wide);
+        case TokType::Percent:
+            if(b == 0) throw std::runtime_error("Modulo by zero");
+            return makeIntValue(a % b, wide);
+        default: throw std::runtime_error("Unsupported integer operator");
+        }
+    }
+    if(kind == NumKind::F32) {
+        double a = valueToLongDouble(L), b = valueToLongDouble(R);
+        switch(op) {
+        case TokType::Plus: return makeFloatValue(a + b);
+        case TokType::Minus: return makeFloatValue(a - b);
+        case TokType::Star: return makeFloatValue(a * b);
+        case TokType::Slash:
+            if(b == 0) throw std::runtime_error("Division by zero");
+            return makeFloatValue(a / b);
+        case TokType::Percent:
+            if(b == 0) throw std::runtime_error("Modulo by zero");
+            return makeFloatValue(fmod(a, b));
+        default: throw std::runtime_error("Unsupported Float operator");
+        }
+    }
+    // Plain: exact legacy double behavior, unchanged.
+    double a = L.isBool ? (L.boolean?1.0:0.0) : L.number;
+    double b = R.isBool ? (R.boolean?1.0:0.0) : R.number;
+    Value v;
+    switch(op) {
+    case TokType::Plus: v.number = a + b; return v;
+    case TokType::Minus: v.number = a - b; return v;
+    case TokType::Star: v.number = a * b; return v;
+    case TokType::Slash:
+        if(b == 0) throw std::runtime_error("Division by zero");
+        v.number = a / b; return v;
+    case TokType::Percent:
+        if((int)b == 0) throw std::runtime_error("Modulo by zero");
+        v.number = (double)((int)a % (int)b); return v;
+    default: throw std::runtime_error("Unsupported arithmetic operator");
+    }
+}
+
+// Exact BigInt exponentiation (repeated squaring) -- used by pow() when the
+// base is a BigInt and the exponent is a non-negative whole number, so
+// pow((BigInt)2, 200) stays exact instead of falling back to long double.
+Value bigPow(const BigInt& base, long long exp) {
+    if(exp < 0) throw std::runtime_error("pow(): a BigInt base needs a non-negative exponent (cast to BigFloat for negative/fractional exponents)");
+    BigInt result = BigInt::fromInt64(1);
+    BigInt b = base;
+    long long e = exp;
+    while(e > 0) {
+        if(e & 1) result = result * b;
+        if(e > 1) b = b * b;
+        e >>= 1;
+    }
+    return makeBigValue(result);
+}
+
+bool isMathBuiltinName(const std::string& name) {
+    static const std::unordered_map<std::string,int> names = {
+        {"sqrt",0},{"sqroot",0},{"pow",0},{"abs",0},{"floor",0},{"ceil",0},
+        {"round",0},{"log",0},{"ln",0},{"log10",0},{"exp",0},
+        {"sin",0},{"cos",0},{"tan",0},{"min",0},{"max",0},
+        {"random",0},{"randomSeed",0}
+    };
+    return names.count(name) > 0;
+}
+
+// PRNG for random()/randomSeed() -- a plain std::mt19937 seeded from
+// random_device by default (so successive random() calls differ run to
+// run), or reseeded deterministically by randomSeed(n) when the caller
+// wants reproducible sequences (e.g. reproducible NN weight init).
+std::mt19937& cnrRngEngine() {
+    static std::mt19937 engine(std::random_device{}());
+    return engine;
+}
+
+// Built-in math functions. Available everywhere a call expression is,
+// e.g. `sqrt(2)`, `pow(2, 10)`, `print(max(a, b))`. When an argument is a
+// BigFloat, the result stays a real arbitrary-precision BigDecimal at that
+// value's own precision (BigFloat(N) -> N fractional digits), instead of
+// getting flattened down to a plain double. sqrt() runs Newton's method
+// entirely in exact decimal arithmetic, so it honors the full precision
+// (up to 1000 digits). log/log10/exp/sin/cos/tan still route through the
+// C math library at long-double precision (~18-19 significant digits) and
+// then get stored into a BigDecimal at the requested precision -- these
+// are true transcendental functions and don't have a closed-form decimal
+// algorithm here, so digits beyond long double's precision are not
+// meaningful for those specific functions.
+Value callMathBuiltin(const std::string& name, std::vector<Value>& args) {
+    auto need = [&](size_t n) {
+        if(args.size() != n)
+            throw std::runtime_error("'" + name + "()' expects " + std::to_string(n) +
+                                      " argument(s), got " + std::to_string(args.size()));
+    };
+    bool useBig = false;
+    int bigPrecision = CNR_BIGDEC_DEFAULT_SCALE;
+    for(auto& a : args) if(a.numKind == NumKind::BigF) { useBig = true; bigPrecision = std::max(bigPrecision, valuePrecisionOrDefault(a)); }
+
+    if(name == "sqrt" || name == "sqroot") {
+        need(1);
+        if(useBig) {
+            BigDecimal x = valueToBigDecimal(args[0], bigPrecision);
+            return makeBigFloatValue(x.sqrtNewton());
+        }
+        long double x = valueToLongDouble(args[0]);
+        if(x < 0) throw std::runtime_error("sqrt(): cannot take the square root of a negative number");
+        long double r = std::sqrt(x);
+        return makePlainNumber((double)r);
+    }
+    if(name == "pow") {
+        need(2);
+        if(args[0].numKind == NumKind::Big && valueIsIntegral(args[1]) && valueToLongDouble(args[1]) >= 0)
+            return bigPow(*args[0].cex().big, valueToI64(args[1]));
+        if(useBig) return makeBigFloatValue(std::pow(valueToLongDouble(args[0]), valueToLongDouble(args[1])), bigPrecision);
+        return makePlainNumber(std::pow(valueToApproxDouble(args[0]), valueToApproxDouble(args[1])));
+    }
+    if(name == "abs") {
+        need(1);
+        Value& a = args[0];
+        switch(a.numKind) {
+        case NumKind::Big: { BigInt b = *a.cex().big; b.negative = false; return makeBigValue(b); }
+        case NumKind::BigF: return makeBigFloatValue(a.cex().bigDec ? a.cex().bigDec->abs() : BigDecimal());
+        case NumKind::I32: return makeIntValue(a.i64 < 0 ? -a.i64 : a.i64, false);
+        case NumKind::I64: return makeIntValue(a.i64 < 0 ? -a.i64 : a.i64, true);
+        case NumKind::F32: return makeFloatValue(a.number < 0 ? -a.number : a.number);
+        default: return makePlainNumber(std::fabs(a.number));
+        }
+    }
+    if(name == "floor" || name == "ceil" || name == "round") {
+        need(1);
+        if(useBig) {
+            BigDecimal x = valueToBigDecimal(args[0], bigPrecision);
+            BigDecimal trunc = x.truncatedToInteger();
+            if(name == "floor") {
+                if(x.isNegative() && BigDecimal::compare(x, trunc) != 0) {
+                    BigDecimal one = BigDecimal::fromString("1", bigPrecision);
+                    trunc = trunc.sub(one);
+                }
+                return makeBigFloatValue(trunc);
+            }
+            if(name == "ceil") {
+                if(!x.isNegative() && BigDecimal::compare(x, trunc) != 0) {
+                    BigDecimal one = BigDecimal::fromString("1", bigPrecision);
+                    trunc = trunc.add(one);
+                }
+                return makeBigFloatValue(trunc);
+            }
+            // round-half-up (matching std::round's away-from-zero behavior)
+            BigDecimal half = BigDecimal::fromString(x.isNegative() ? "-0.5" : "0.5", bigPrecision);
+            BigDecimal shifted = x.add(half);
+            return makeBigFloatValue(shifted.truncatedToInteger());
+        }
+        long double x = valueToLongDouble(args[0]);
+        long double r = (name=="floor") ? std::floor(x) : (name=="ceil") ? std::ceil(x) : std::round(x);
+        return makePlainNumber((double)r);
+    }
+    if(name == "log" || name == "ln") { // natural log, matches C's log()
+        need(1);
+        long double x = valueToLongDouble(args[0]);
+        if(x <= 0) throw std::runtime_error("log(): argument must be positive");
+        long double r = std::log(x);
+        return useBig ? makeBigFloatValue(r, bigPrecision) : makePlainNumber((double)r);
+    }
+    if(name == "log10") {
+        need(1);
+        long double x = valueToLongDouble(args[0]);
+        if(x <= 0) throw std::runtime_error("log10(): argument must be positive");
+        long double r = std::log10(x);
+        return useBig ? makeBigFloatValue(r, bigPrecision) : makePlainNumber((double)r);
+    }
+    if(name == "exp") {
+        need(1);
+        long double r = std::exp(valueToLongDouble(args[0]));
+        return useBig ? makeBigFloatValue(r, bigPrecision) : makePlainNumber((double)r);
+    }
+    if(name == "sin" || name == "cos" || name == "tan") {
+        need(1);
+        long double x = valueToLongDouble(args[0]);
+        long double r = (name=="sin") ? std::sin(x) : (name=="cos") ? std::cos(x) : std::tan(x);
+        return useBig ? makeBigFloatValue(r, bigPrecision) : makePlainNumber((double)r);
+    }
+    if(name == "min" || name == "max") {
+        need(2);
+        int c = numericCompare(args[0], args[1]);
+        if(name == "min") return c <= 0 ? args[0] : args[1];
+        return c >= 0 ? args[0] : args[1];
+    }
+    if(name == "random") {
+        // random() -> uniform double in [0,1). random(n) -> uniform double
+        // in [0,n). random(lo, hi) -> uniform double in [lo,hi).
+        if(args.size() == 0) {
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
+            return makePlainNumber(dist(cnrRngEngine()));
+        }
+        if(args.size() == 1) {
+            double hi = valueToApproxDouble(args[0]);
+            std::uniform_real_distribution<double> dist(0.0, hi);
+            return makePlainNumber(dist(cnrRngEngine()));
+        }
+        need(2);
+        double lo = valueToApproxDouble(args[0]);
+        double hi = valueToApproxDouble(args[1]);
+        std::uniform_real_distribution<double> dist(lo, hi);
+        return makePlainNumber(dist(cnrRngEngine()));
+    }
+    if(name == "randomSeed") {
+        need(1);
+        cnrRngEngine().seed((unsigned long)valueToApproxDouble(args[0]));
+        return makePlainNumber(0);
+    }
+    throw std::runtime_error("Unknown built-in math function '" + name + "'");
+}
+
+// Statement-execution result: `execute`/`executeBlock` used to signal a
+// `return` by throwing ReturnSignal (a C++ exception) and catching it at
+// every function-call boundary. Per profiling, throw/catch is dramatically
+// more expensive than a plain value return (stack unwinding + RTTI type
+// matching on every single CnR function call/return). ExecResult replaces
+// that: execute() returns a status telling the caller whether a `return`
+// statement fired, and (if so) the returned Value is written into an
+// out-parameter passed down the call chain. executeBlock() checks the
+// status after each statement and stops early on Return, exactly mirroring
+// what "the exception propagates past not-yet-executed statements" used to
+// do -- just without ever unwinding the C++ stack.
+enum class ExecResult { Normal, Return };
 
 // Thrown by Fail() to abort the current attempt of the enclosing Nodes{}
 // node body. Caught by the per-node retry loop in runNodesWorkflow(); if
@@ -1499,7 +2713,7 @@ struct JsonParser {
             skipWs();
             if(advance() != ':') throw std::runtime_error("JSON parse error: expected ':' at position " + std::to_string(pos));
             Value val = parseValue();
-            (*obj.object)[key] = val;
+            (*obj.cex().object)[key] = val;
             skipWs();
             char c = advance();
             if(c == ',') continue;
@@ -1516,7 +2730,7 @@ struct JsonParser {
         if(peek() == ']') { advance(); return arr; }
         while(true) {
             Value val = parseValue();
-            arr.objectArray->push_back(val);
+            arr.cex().objectArray->push_back(val);
             skipWs();
             char c = advance();
             if(c == ',') continue;
@@ -1632,7 +2846,7 @@ void serializeJsonInto(std::ostringstream& oss, const Value& v) {
     if(v.isStruct) {
         oss << '{';
         bool first = true;
-        for(auto& kv : *v.fields) {
+        for(auto& kv : *v.cex().fields) {
             if(!first) oss << ',';
             first = false;
             jsonEscapeInto(oss, kv.first);
@@ -1643,10 +2857,10 @@ void serializeJsonInto(std::ostringstream& oss, const Value& v) {
         return;
     }
     if(v.isObject) {
-        if(v.isObjectArray) {
+        if(v.cex().isObjectArray) {
             oss << '[';
             bool first = true;
-            for(auto& item : *v.objectArray) {
+            for(auto& item : *v.cex().objectArray) {
                 if(!first) oss << ',';
                 first = false;
                 serializeJsonInto(oss, item);
@@ -1655,7 +2869,7 @@ void serializeJsonInto(std::ostringstream& oss, const Value& v) {
         } else {
             oss << '{';
             bool first = true;
-            for(auto& kv : *v.object) {
+            for(auto& kv : *v.cex().object) {
                 if(!first) oss << ',';
                 first = false;
                 jsonEscapeInto(oss, kv.first);
@@ -2093,41 +3307,41 @@ struct ServerInstance {
 // request.contentType, request.contentLength.
 inline Value buildRequestValue(const ParsedServerRequest& req, const std::unordered_map<std::string,std::string>& params) {
     Value r = Value::makeObject();
-    (*r.object)["method"] = Value::makeString(req.method);
-    (*r.object)["path"] = Value::makeString(req.path);
-    (*r.object)["ip"] = Value::makeString(req.clientIp);
-    (*r.object)["contentType"] = Value::makeString(req.contentType);
-    { Value cl; cl.number = (double)req.contentLength; (*r.object)["contentLength"] = cl; }
-    (*r.object)["body"] = Value::makeString(req.body);
+    (*r.cex().object)["method"] = Value::makeString(req.method);
+    (*r.cex().object)["path"] = Value::makeString(req.path);
+    (*r.cex().object)["ip"] = Value::makeString(req.clientIp);
+    (*r.cex().object)["contentType"] = Value::makeString(req.contentType);
+    { Value cl; cl.number = (double)req.contentLength; (*r.cex().object)["contentLength"] = cl; }
+    (*r.cex().object)["body"] = Value::makeString(req.body);
 
     Value paramsObj = Value::makeObject();
-    paramsObj.isLenientMap = true;
-    for(auto& kv : params) (*paramsObj.object)[kv.first] = Value::makeString(kv.second);
-    (*r.object)["params"] = paramsObj;
+    paramsObj.ex().isLenientMap = true;
+    for(auto& kv : params) (*paramsObj.cex().object)[kv.first] = Value::makeString(kv.second);
+    (*r.cex().object)["params"] = paramsObj;
 
     Value queryObj = Value::makeObject();
-    queryObj.isLenientMap = true;
-    for(auto& kv : req.query) (*queryObj.object)[kv.first] = Value::makeString(kv.second);
-    (*r.object)["query"] = queryObj;
+    queryObj.ex().isLenientMap = true;
+    for(auto& kv : req.query) (*queryObj.cex().object)[kv.first] = Value::makeString(kv.second);
+    (*r.cex().object)["query"] = queryObj;
 
     Value headerObj = Value::makeObject();
-    headerObj.isLenientMap = true;
-    for(auto& kv : req.headers) (*headerObj.object)[kv.first] = Value::makeString(kv.second);
-    (*r.object)["header"] = headerObj;
+    headerObj.ex().isLenientMap = true;
+    for(auto& kv : req.headers) (*headerObj.cex().object)[kv.first] = Value::makeString(kv.second);
+    (*r.cex().object)["header"] = headerObj;
 
     Value cookieObj = Value::makeObject();
-    cookieObj.isLenientMap = true;
-    for(auto& kv : req.cookies) (*cookieObj.object)[kv.first] = Value::makeString(kv.second);
-    (*r.object)["cookie"] = cookieObj;
+    cookieObj.ex().isLenientMap = true;
+    for(auto& kv : req.cookies) (*cookieObj.cex().object)[kv.first] = Value::makeString(kv.second);
+    (*r.cex().object)["cookie"] = cookieObj;
 
     if(!req.body.empty()) {
         try {
-            (*r.object)["json"] = parseJsonString(req.body);
+            (*r.cex().object)["json"] = parseJsonString(req.body);
         } catch(...) {
-            (*r.object)["json"] = Value::makeNull();
+            (*r.cex().object)["json"] = Value::makeNull();
         }
     } else {
-        (*r.object)["json"] = Value::makeNull();
+        (*r.cex().object)["json"] = Value::makeNull();
     }
     return r;
 }
@@ -2491,8 +3705,8 @@ struct DbRecordTable {
         pkIndex.clear();
         if(primaryKeyField.empty()) return;
         for(size_t i=0;i<records.size();++i) {
-            auto it = records[i].fields->find(primaryKeyField);
-            if(it != records[i].fields->end())
+            auto it = records[i].cex().fields->find(primaryKeyField);
+            if(it != records[i].cex().fields->end())
                 pkIndex[valueToDisplayString(it->second)] = i;
         }
     }
@@ -2525,6 +3739,7 @@ public:
                 std::unordered_map<std::string, StructDecl> strs)
         : functions(std::move(fns)), structs(std::move(strs)) {
         scopes.push_back({});
+        seedConstants();
     }
 
     Interpreter(std::unordered_map<std::string, FunctionDecl> fns,
@@ -2532,12 +3747,26 @@ public:
                 std::unordered_map<std::string, DataDecl> das)
         : functions(std::move(fns)), structs(std::move(strs)) {
         scopes.push_back({});
+        seedConstants();
         initDatabases(das);
     }
 
     Interpreter(const Interpreter& parent, bool /*forThread*/)
         : functions(parent.functions), structs(parent.structs), threadRegistry(parent.threadRegistry) {
         scopes.push_back({});
+        seedConstants();
+    }
+
+    // Pre-populates the global scope with named math constants (pi, e/euler,
+    // phi, psi) so they read like ordinary variables anywhere in a program.
+    // A local `var pi = ...;` in the same scope will still shadow/overwrite
+    // them like any other var -- these aren't hard-protected constants.
+    void seedConstants() {
+        scopes.back()["pi"] = makeBigFloatValue(cnrConstantAtPrecision(CNR_PI_DIGITS, CNR_BIGDEC_DEFAULT_SCALE));
+        scopes.back()["e"] = makeBigFloatValue(cnrConstantAtPrecision(CNR_E_DIGITS, CNR_BIGDEC_DEFAULT_SCALE));
+        scopes.back()["euler"] = makeBigFloatValue(cnrConstantAtPrecision(CNR_E_DIGITS, CNR_BIGDEC_DEFAULT_SCALE));
+        scopes.back()["phi"] = makeBigFloatValue(cnrConstantAtPrecision(CNR_PHI_DIGITS, CNR_BIGDEC_DEFAULT_SCALE));
+        scopes.back()["psi"] = makeBigFloatValue(cnrConstantAtPrecision(CNR_PSI_DIGITS, CNR_BIGDEC_DEFAULT_SCALE));
     }
 
     std::vector<std::unordered_map<std::string, Value>> scopes;
@@ -2569,19 +3798,90 @@ Value& lookupVar(const std::string& name) {
 
 Value& resolveVar(const std::string& name) {
     if(currentSelf) {
-        auto it = currentSelf->fields->find(name);
-        if(it != currentSelf->fields->end()) return it->second;
+        auto it = currentSelf->cex().fields->find(name);
+        if(it != currentSelf->cex().fields->end()) return it->second;
     }
     return lookupVar(name);
 }
 
+// Walks a NestedArrayLitExpr (built from var[]...[] = {{...},{...}}) and
+// flattens it into row-major `array` data, inferring `dims` from the shape
+// of the literal itself. Every row/sub-list at a given depth must have the
+// same length as its siblings, mirroring how a real matrix/tensor requires
+// a consistent shape (a "ragged" literal is a usage error, not silently
+// accepted).
+void collectTensorShape(const std::shared_ptr<NestedArrayLitExpr>& node, int depth, std::vector<int>& dims) {
+    size_t n = node->isLeaf ? node->leafValues.size() : node->children.size();
+    if((int)dims.size() <= depth) dims.push_back((int)n);
+    else if(dims[depth] != (int)n)
+        throw std::runtime_error("Inconsistent Matrix/Tensor shape: expected " + std::to_string(dims[depth]) + " element(s) at depth " + std::to_string(depth) + ", got " + std::to_string(n));
+    if(!node->isLeaf) {
+        for(auto& child : node->children) collectTensorShape(child, depth + 1, dims);
+    }
+}
+void flattenTensorLiteral(const std::shared_ptr<NestedArrayLitExpr>& node, std::vector<double>& out) {
+    if(node->isLeaf) {
+        for(auto& e : node->leafValues) out.push_back(evalNumber(e));
+    } else {
+        for(auto& child : node->children) flattenTensorLiteral(child, out);
+    }
+}
+Value buildTensorFromLiteral(const std::shared_ptr<NestedArrayLitExpr>& lit) {
+    Value v;
+    v.isArray = true;
+    collectTensorShape(lit, 0, v.dims);
+    flattenTensorLiteral(lit, v.array);
+    return v;
+}
+
+// Evaluates a BinaryExpr at the Value level so typed operands (Int/long/
+// BigInt/Float/BigFloat) keep their type through comparisons and arithmetic
+// instead of being flattened to a plain double. evalNumber/evalBool/
+// evalToValue all funnel BinaryExpr through here.
+Value evalBinaryValue(const std::shared_ptr<BinaryExpr>& b) {
+    if(b->op==TokType::AndAnd) { Value v; v.isBool=true; v.boolean = evalBool(b->left) && evalBool(b->right); return v; }
+    if(b->op==TokType::OrOr) { Value v; v.isBool=true; v.boolean = evalBool(b->left) || evalBool(b->right); return v; }
+    if(b->op==TokType::EqualEqual || b->op==TokType::BangEqual) {
+        Value L = evalToValue(b->left);
+        Value R = evalToValue(b->right);
+        bool eq = valuesEqual(L, R);
+        Value v; v.isBool=true; v.boolean = (b->op==TokType::EqualEqual ? eq : !eq); return v;
+    }
+    if(b->op==TokType::Less || b->op==TokType::Greater || b->op==TokType::LessEqual || b->op==TokType::GreaterEqual) {
+        Value L = evalToValue(b->left);
+        Value R = evalToValue(b->right);
+        int c = numericCompare(L, R);
+        bool res = false;
+        switch(b->op) {
+        case TokType::Less: res = c<0; break;
+        case TokType::Greater: res = c>0; break;
+        case TokType::LessEqual: res = c<=0; break;
+        case TokType::GreaterEqual: res = c>=0; break;
+        default: break;
+        }
+        Value v; v.isBool=true; v.boolean = res; return v;
+    }
+    Value L = evalToValue(b->left);
+    Value R = evalToValue(b->right);
+    return numericBinaryOp(b->op, L, R);
+}
+
 double evalNumber(const ExprPtr& expr)
 {
-    if(auto n = std::dynamic_pointer_cast<NumberExpr>(expr)) return n->value;
+    // Dispatch on the AST tag instead of trying std::dynamic_pointer_cast<T>
+    // against every possible type in sequence. Each case below is exactly
+    // the original branch's body, with `dynamic_pointer_cast<T>(expr)`
+    // replaced by `static_cast<T*>(expr.get())`, which is safe here because
+    // `kind` is set once at construction and always matches the real type.
+    switch(expr->kind) {
+    case ExprKind::Number:
+        return static_cast<NumberExpr*>(expr.get())->value;
 
-    if(auto bo = std::dynamic_pointer_cast<BoolExpr>(expr)) return bo->value ? 1.0 : 0.0;
+    case ExprKind::Bool:
+        return static_cast<BoolExpr*>(expr.get())->value ? 1.0 : 0.0;
 
-    if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+    case ExprKind::Var: {
+        auto v = static_cast<VarExpr*>(expr.get());
         Value& val = resolveVar(v->name);
         if(val.isArray)
             throw std::runtime_error("Cannot use array '" + v->name + "' as a number");
@@ -2591,67 +3891,71 @@ double evalNumber(const ExprPtr& expr)
         return val.number;
     }
 
-    if(auto u = std::dynamic_pointer_cast<UnaryExpr>(expr)) {
+    case ExprKind::Unary: {
+        auto u = static_cast<UnaryExpr*>(expr.get());
         if(u->op==TokType::Bang) return evalBool(u->expr) ? 0.0 : 1.0;
         double x = evalNumber(u->expr);
         if(u->op==TokType::Minus) return -x;
         return x;
     }
 
-    if(auto cc = std::dynamic_pointer_cast<CharCastExpr>(expr)) {
-        return evalNumber(cc->expr);
+    case ExprKind::CharCast:
+        return evalNumber(static_cast<CharCastExpr*>(expr.get())->expr);
+
+    case ExprKind::IntCast:
+    case ExprKind::LongCast:
+    case ExprKind::FloatCast:
+    case ExprKind::BigIntCast:
+    case ExprKind::BigFloatCast:
+        return valueToApproxDouble(evalToValue(expr));
+
+    case ExprKind::Binary: {
+        auto b = std::static_pointer_cast<BinaryExpr>(expr);
+        Value v = evalBinaryValue(b);
+        return v.isBool ? (v.boolean ? 1.0 : 0.0) : valueToApproxDouble(v);
     }
 
-    if(auto b = std::dynamic_pointer_cast<BinaryExpr>(expr)) {
-        if(b->op==TokType::AndAnd) return (evalBool(b->left) && evalBool(b->right)) ? 1.0 : 0.0;
-        if(b->op==TokType::OrOr) return (evalBool(b->left) || evalBool(b->right)) ? 1.0 : 0.0;
-        if(b->op==TokType::EqualEqual || b->op==TokType::BangEqual) {
-            Value L = evalToValue(b->left);
-            Value R = evalToValue(b->right);
-            bool eq = valuesEqual(L, R);
-            return (b->op==TokType::EqualEqual ? eq : !eq) ? 1.0 : 0.0;
-        }
-
-        double L = evalNumber(b->left);
-        double R = evalNumber(b->right);
-        switch(b->op) {
-        case TokType::Plus: return L+R;
-        case TokType::Minus: return L-R;
-        case TokType::Star: return L*R;
-        case TokType::Slash:
-            if(R==0) throw std::runtime_error("Division by zero");
-            return L/R;
-        case TokType::Percent:
-            if((int)R==0) throw std::runtime_error("Modulo by zero");
-            return (int)L%(int)R;
-        case TokType::Less: return L<R ? 1.0 : 0.0;
-        case TokType::Greater: return L>R ? 1.0 : 0.0;
-        case TokType::LessEqual: return L<=R ? 1.0 : 0.0;
-        case TokType::GreaterEqual: return L>=R ? 1.0 : 0.0;
-        default: break;
-        }
-    }
-
-    if(auto a = std::dynamic_pointer_cast<ArrayAccessExpr>(expr)) {
+    case ExprKind::ArrayAccess: {
+        auto a = static_cast<ArrayAccessExpr*>(expr.get());
         if(!a->index)
             throw std::runtime_error("Array '" + a->arrayName + "' used without an index in this context");
         Value& val = resolveVar(a->arrayName);
         if(!val.isArray)
             throw std::runtime_error("'" + a->arrayName + "' is not an array");
         int index = (int)evalNumber(a->index);
+        if(val.dims.size() > 1)
+            throw std::runtime_error("'" + a->arrayName + "' is a Matrix/Tensor and needs " + std::to_string(val.dims.size()) + " indices to use as a number, e.g. " + a->arrayName + "[i][j]...");
         if(index < 0 || index >= (int)val.array.size())
             throw std::runtime_error("Array index out of bounds for '" + a->arrayName + "': " + std::to_string(index));
         return val.array[index];
     }
 
-    if(auto l = std::dynamic_pointer_cast<LenExpr>(expr)) {
+    case ExprKind::TensorAccess: {
+        auto ta = static_cast<TensorAccessExpr*>(expr.get());
+        Value& val = resolveVar(ta->arrayName);
+        if(!val.isArray || val.dims.empty())
+            throw std::runtime_error("'" + ta->arrayName + "' is not a Matrix/Tensor");
+        std::vector<int> idx;
+        for(auto& e : ta->indices) idx.push_back((int)evalNumber(e));
+        if(idx.size() != val.dims.size())
+            throw std::runtime_error("'" + ta->arrayName + "' needs " + std::to_string(val.dims.size()) + " index/indices to use as a number, got " + std::to_string(idx.size()));
+        for(size_t i=0;i<idx.size();++i)
+            if(idx[i]<0 || idx[i]>=val.dims[i])
+                throw std::runtime_error("Tensor index out of bounds for '" + ta->arrayName + "' at dimension " + std::to_string(i) + ": " + std::to_string(idx[i]));
+        return val.array[tensorFlatOffset(val.dims, idx)];
+    }
+
+    case ExprKind::Len: {
+        auto l = static_cast<LenExpr*>(expr.get());
         Value& val = resolveVar(l->arrayName);
         if(!val.isArray)
             throw std::runtime_error("'" + l->arrayName + "' is not an array");
+        if(!val.dims.empty()) return (double)val.dims[0];
         return (double)val.array.size();
     }
 
-    if(auto m = std::dynamic_pointer_cast<MemberAccessExpr>(expr)) {
+    case ExprKind::MemberAccess: {
+        auto m = std::static_pointer_cast<MemberAccessExpr>(expr);
         Value v = evalMemberAccess(m);
         if(v.isArray) throw std::runtime_error("Cannot use array field '" + m->member + "' as a number");
         if(v.isStruct) throw std::runtime_error("Cannot use struct field '" + m->member + "' as a number");
@@ -2661,113 +3965,246 @@ double evalNumber(const ExprPtr& expr)
         return v.isBool ? (v.boolean ? 1.0 : 0.0) : v.number;
     }
 
-    if(auto c = std::dynamic_pointer_cast<CallExpr>(expr)) {
+    case ExprKind::Call: {
+        auto c = static_cast<CallExpr*>(expr.get());
         Value v = callCallable(c->name, c->args);
         if(v.isArray) throw std::runtime_error("Cannot use array result of '" + c->name + "' as a number");
         if(v.isStruct) throw std::runtime_error("Cannot use struct result of '" + c->name + "' as a number");
         return v.isBool ? (v.boolean ? 1.0 : 0.0) : v.number;
     }
 
-    if(auto t = std::dynamic_pointer_cast<ThreadExpr>(expr)) {
+    case ExprKind::Thread: {
+        auto t = std::static_pointer_cast<ThreadExpr>(expr);
         Value v = spawnThread(t);
         return v.number;
     }
 
-    if(auto j = std::dynamic_pointer_cast<JoinExpr>(expr)) {
+    case ExprKind::Join: {
+        auto j = std::static_pointer_cast<JoinExpr>(expr);
         Value v = joinThread(j);
         if(v.isArray) throw std::runtime_error("Cannot use array result of join() as a number");
         if(v.isStruct) throw std::runtime_error("Cannot use struct result of join() as a number");
         return v.isBool ? (v.boolean ? 1.0 : 0.0) : v.number;
     }
 
-    if(auto am = std::dynamic_pointer_cast<ArrayMethodCallExpr>(expr)) {
+    case ExprKind::ArrayMethodCall: {
+        auto am = std::static_pointer_cast<ArrayMethodCallExpr>(expr);
         return callArrayMethod(am);
+    }
+
+    default:
+        break;
     }
 
     throw std::runtime_error("Cannot evaluate numeric expression.");
 }
 bool evalBool(const ExprPtr& expr)
 {
-    if(auto b = std::dynamic_pointer_cast<BoolExpr>(expr)) return b->value;
+    // Same tag-dispatch approach as evalNumber. The original fell through to
+    // `evalNumber(expr)!=0` for every kind not explicitly handled above
+    // (including a Unary whose op isn't Bang) -- that fallthrough is
+    // preserved exactly via the switch's `default`/`break` path below.
+    switch(expr->kind) {
+    case ExprKind::Bool:
+        return static_cast<BoolExpr*>(expr.get())->value;
 
-    if(auto u = std::dynamic_pointer_cast<UnaryExpr>(expr)) {
+    case ExprKind::Unary: {
+        auto u = static_cast<UnaryExpr*>(expr.get());
         if(u->op==TokType::Bang) return !evalBool(u->expr);
+        break;
     }
 
-    if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+    case ExprKind::Var: {
+        auto v = static_cast<VarExpr*>(expr.get());
         Value& val = resolveVar(v->name);
         if(val.isBool) return val.boolean;
         return val.number != 0;
     }
 
-    if(auto op = std::dynamic_pointer_cast<BinaryExpr>(expr)) {
-        switch(op->op) {
-        case TokType::AndAnd: return evalBool(op->left) && evalBool(op->right);
-        case TokType::OrOr: return evalBool(op->left) || evalBool(op->right);
-        case TokType::EqualEqual:
-        case TokType::BangEqual: {
-            Value L = evalToValue(op->left);
-            Value R = evalToValue(op->right);
-            bool eq = valuesEqual(L, R);
-            return op->op==TokType::EqualEqual ? eq : !eq;
-        }
-        case TokType::Less:
-        case TokType::Greater:
-        case TokType::LessEqual:
-        case TokType::GreaterEqual: {
-            double L = evalNumber(op->left);
-            double R = evalNumber(op->right);
-            switch(op->op) {
-            case TokType::Less: return L<R;
-            case TokType::Greater: return L>R;
-            case TokType::LessEqual: return L<=R;
-            case TokType::GreaterEqual: return L>=R;
-            default: break;
-            }
-        }
-        default: break;
-        }
+    case ExprKind::Binary: {
+        auto op = std::static_pointer_cast<BinaryExpr>(expr);
+        Value v = evalBinaryValue(op);
+        return v.isBool ? v.boolean : (valueToApproxDouble(v) != 0);
+    }
+
+    default:
+        break;
     }
 
     return evalNumber(expr)!=0;
 }
 
 Value evalToValue(const ExprPtr& expr) {
-    if(auto c = std::dynamic_pointer_cast<CallExpr>(expr)) return callCallable(c->name, c->args);
-    if(auto m = std::dynamic_pointer_cast<MemberAccessExpr>(expr)) return evalMemberAccess(m);
-    if(auto b = std::dynamic_pointer_cast<BoolExpr>(expr)) { Value v; v.isBool=true; v.boolean=b->value; return v; }
-    if(auto t = std::dynamic_pointer_cast<ThreadExpr>(expr)) return spawnThread(t);
-    if(auto j = std::dynamic_pointer_cast<JoinExpr>(expr)) return joinThread(j);
-    if(auto ja = std::dynamic_pointer_cast<JoinAllExpr>(expr)) return joinAllThreads(ja);
-    if(auto am = std::dynamic_pointer_cast<ArrayMethodCallExpr>(expr)) { Value v; v.number = callArrayMethod(am); return v; }
-    if(auto sl = std::dynamic_pointer_cast<StringLitExpr>(expr)) return Value::makeString(sl->value);
-    if(auto sc = std::dynamic_pointer_cast<StringCastExpr>(expr)) return Value::makeString(valueToDisplayString(evalToValue(sc->expr)));
-    if(auto jo = std::dynamic_pointer_cast<JsonObjectLitExpr>(expr)) {
+    // Tag dispatch, same technique as evalNumber/evalBool. Kinds that had no
+    // explicit branch in the original if-chain (Number, Len, CharCast) fall
+    // through to the same final `evalNumber(expr)` computation, preserved
+    // below as the switch's default case.
+    switch(expr->kind) {
+    case ExprKind::Call: {
+        auto c = static_cast<CallExpr*>(expr.get());
+        return callCallable(c->name, c->args);
+    }
+    case ExprKind::MemberAccess:
+        return evalMemberAccess(std::static_pointer_cast<MemberAccessExpr>(expr));
+    case ExprKind::Bool: {
+        Value v; v.isBool=true; v.boolean=static_cast<BoolExpr*>(expr.get())->value; return v;
+    }
+    case ExprKind::Thread:
+        return spawnThread(std::static_pointer_cast<ThreadExpr>(expr));
+    case ExprKind::Join:
+        return joinThread(std::static_pointer_cast<JoinExpr>(expr));
+    case ExprKind::JoinAll:
+        return joinAllThreads(std::static_pointer_cast<JoinAllExpr>(expr));
+    case ExprKind::ArrayMethodCall: {
+        Value v; v.number = callArrayMethod(std::static_pointer_cast<ArrayMethodCallExpr>(expr)); return v;
+    }
+    case ExprKind::StringLit:
+        return Value::makeString(static_cast<StringLitExpr*>(expr.get())->value);
+    case ExprKind::StringCast: {
+        auto sc = static_cast<StringCastExpr*>(expr.get());
+        return Value::makeString(valueToDisplayString(evalToValue(sc->expr)));
+    }
+    case ExprKind::JsonObjectLit: {
+        auto jo = static_cast<JsonObjectLitExpr*>(expr.get());
         Value obj = Value::makeObject();
         for(auto& kv : jo->entries) {
             std::string key = valueToDisplayString(evalToValue(kv.first));
-            (*obj.object)[key] = evalToValue(kv.second);
+            (*obj.cex().object)[key] = evalToValue(kv.second);
         }
         return obj;
     }
-    if(auto hc = std::dynamic_pointer_cast<HttpCallExpr>(expr)) return performHttpCall(hc);
-    if(auto sc = std::dynamic_pointer_cast<ServerConfigExpr>(expr)) {
+    case ExprKind::HttpCall:
+        return performHttpCall(std::static_pointer_cast<HttpCallExpr>(expr));
+    case ExprKind::ServerConfig: {
+        auto sc = static_cast<ServerConfigExpr*>(expr.get());
         Value v;
-        v.isServer = true;
-        v.server = std::make_shared<ServerInstance>();
-        for(auto& kv : sc->entries) v.server->config[kv.first] = evalToValue(kv.second);
+        v.ex().isServer = true;
+        v.ex().server = std::make_shared<ServerInstance>();
+        for(auto& kv : sc->entries) v.cex().server->config[kv.first] = evalToValue(kv.second);
         return v;
     }
-    if(auto omc = std::dynamic_pointer_cast<ObjectMethodCallExpr>(expr)) return callObjectMethod(omc);
-    if(auto dm = std::dynamic_pointer_cast<DbMethodCallExpr>(expr)) return callDbMethod(dm);
-    if(std::dynamic_pointer_cast<FailExpr>(expr)) throw NodeFailSignal{};
-    if(auto th = std::dynamic_pointer_cast<ThrowExpr>(expr)) {
+    case ExprKind::ObjectMethodCall:
+        return callObjectMethod(std::static_pointer_cast<ObjectMethodCallExpr>(expr));
+    case ExprKind::DbMethodCall:
+        return callDbMethod(std::static_pointer_cast<DbMethodCallExpr>(expr));
+    case ExprKind::Fail:
+        throw NodeFailSignal{};
+    case ExprKind::Throw: {
+        auto th = static_cast<ThrowExpr*>(expr.get());
         std::string msg = valueToDisplayString(evalToValue(th->messageExpr));
         throw CnrThrowSignal{msg};
     }
-    if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+    case ExprKind::Var: {
+        auto v = static_cast<VarExpr*>(expr.get());
         Value& val = resolveVar(v->name);
         return val;
+    }
+    case ExprKind::Binary:
+        return evalBinaryValue(std::static_pointer_cast<BinaryExpr>(expr));
+    case ExprKind::Unary: {
+        auto u = static_cast<UnaryExpr*>(expr.get());
+        if(u->op==TokType::Bang) { Value v; v.isBool=true; v.boolean = !evalBool(u->expr); return v; }
+        Value x = evalToValue(u->expr);
+        if(u->op==TokType::Minus) {
+            switch(x.numKind) {
+            case NumKind::Big: return makeBigValue(-(*x.cex().big));
+            case NumKind::BigF: return makeBigFloatValue(x.cex().bigDec ? x.cex().bigDec->negate() : BigDecimal());
+            case NumKind::I32: return makeIntValue(-x.i64, false);
+            case NumKind::I64: return makeIntValue(-x.i64, true);
+            case NumKind::F32: return makeFloatValue(-x.number);
+            default: { Value v; v.number = -(x.isBool ? (x.boolean?1.0:0.0) : x.number); return v; }
+            }
+        }
+        return x;
+    }
+    case ExprKind::IntCast: {
+        auto ic = static_cast<IntCastExpr*>(expr.get());
+        return makeIntValue(valueToI64(evalToValue(ic->expr)), false);
+    }
+    case ExprKind::LongCast: {
+        auto lc = static_cast<LongCastExpr*>(expr.get());
+        return makeIntValue(valueToI64(evalToValue(lc->expr)), true);
+    }
+    case ExprKind::FloatCast: {
+        auto fc = static_cast<FloatCastExpr*>(expr.get());
+        return makeFloatValue(valueToLongDouble(evalToValue(fc->expr)));
+    }
+    case ExprKind::BigIntCast: {
+        auto bic = static_cast<BigIntCastExpr*>(expr.get());
+        if(bic->expr->kind == ExprKind::Number) {
+            auto num = static_cast<NumberExpr*>(bic->expr.get());
+            if(!num->text.empty() && num->text.find('.') == std::string::npos)
+                return makeBigValue(BigInt::fromString(num->text));
+        }
+        return makeBigValue(valueToBigInt(evalToValue(bic->expr)));
+    }
+    case ExprKind::BigFloatCast: {
+        auto bfc = static_cast<BigFloatCastExpr*>(expr.get());
+        int precision = CNR_BIGDEC_DEFAULT_SCALE;
+        if(bfc->precisionExpr) precision = BigDecimal::clampPrecision((int)evalNumber(bfc->precisionExpr));
+        // A literal numeric expression is parsed straight from its exact
+        // source text ("3.14159...") rather than round-tripping through a
+        // double/long double first, so BigFloat(N) on a literal keeps every
+        // digit the user actually wrote, up to N fractional digits.
+        if(bfc->expr->kind == ExprKind::Number) {
+            auto num = static_cast<NumberExpr*>(bfc->expr.get());
+            if(!num->text.empty()) return makeBigFloatValue(BigDecimal::fromString(num->text, precision));
+        }
+        Value inner = evalToValue(bfc->expr);
+        if(inner.numKind == NumKind::BigF && inner.cex().bigDec) {
+            BigDecimal r = *inner.cex().bigDec;
+            r.precision = precision;
+            r.roundToPrecision(precision);
+            return makeBigFloatValue(r);
+        }
+        if(inner.numKind == NumKind::Big && inner.cex().big) {
+            BigDecimal r;
+            r.precision = precision;
+            r.scale = 0;
+            r.mantissa = *inner.cex().big;
+            return makeBigFloatValue(r);
+        }
+        return makeBigFloatValue(valueToLongDouble(inner), precision);
+    }
+    case ExprKind::ArrayAccess: {
+        auto a = static_cast<ArrayAccessExpr*>(expr.get());
+        if(!a->index)
+            throw std::runtime_error("Array '" + a->arrayName + "' used without an index in this context");
+        Value& val = resolveVar(a->arrayName);
+        if(!val.isArray)
+            throw std::runtime_error("'" + a->arrayName + "' is not an array");
+        int index = (int)evalNumber(a->index);
+        if(!val.dims.empty()) {
+            if(index < 0 || index >= val.dims[0])
+                throw std::runtime_error("Tensor index out of bounds for '" + a->arrayName + "': " + std::to_string(index));
+            if(val.dims.size() == 1) {
+                Value v; v.number = val.array[index]; return v;
+            }
+            return tensorSlice(val, {index});
+        }
+        if(index < 0 || index >= (int)val.array.size())
+            throw std::runtime_error("Array index out of bounds for '" + a->arrayName + "': " + std::to_string(index));
+        Value v; v.number = val.array[index]; return v;
+    }
+    case ExprKind::TensorAccess: {
+        auto ta = static_cast<TensorAccessExpr*>(expr.get());
+        Value& val = resolveVar(ta->arrayName);
+        if(!val.isArray || val.dims.empty())
+            throw std::runtime_error("'" + ta->arrayName + "' is not a Matrix/Tensor");
+        std::vector<int> idx;
+        for(auto& e : ta->indices) idx.push_back((int)evalNumber(e));
+        if(idx.size() > val.dims.size())
+            throw std::runtime_error("Too many indices for '" + ta->arrayName + "' (has " + std::to_string(val.dims.size()) + " dimension(s))");
+        for(size_t i=0;i<idx.size();++i)
+            if(idx[i]<0 || idx[i]>=val.dims[i])
+                throw std::runtime_error("Tensor index out of bounds for '" + ta->arrayName + "' at dimension " + std::to_string(i) + ": " + std::to_string(idx[i]));
+        if(idx.size() == val.dims.size()) {
+            Value v; v.number = val.array[tensorFlatOffset(val.dims, idx)]; return v;
+        }
+        return tensorSlice(val, idx);
+    }
+    default:
+        break;
     }
     Value v; v.number = evalNumber(expr); return v;
 }
@@ -2888,25 +4325,25 @@ Value performHttpCall(const std::shared_ptr<HttpCallExpr>& hc) {
 
     Value result = Value::makeObject();
     Value statusVal; statusVal.number = (double)resp.status;
-    (*result.object)["status"] = statusVal;
-    (*result.object)["statusText"] = Value::makeString(resp.statusText);
-    (*result.object)["body"] = Value::makeString(resp.body);
+    (*result.cex().object)["status"] = statusVal;
+    (*result.cex().object)["statusText"] = Value::makeString(resp.statusText);
+    (*result.cex().object)["body"] = Value::makeString(resp.body);
 
     Value headersObj = Value::makeObject();
-    for(auto& kv : resp.headers) (*headersObj.object)[kv.first] = Value::makeString(kv.second);
-    (*result.object)["headers"] = headersObj;
+    for(auto& kv : resp.headers) (*headersObj.cex().object)[kv.first] = Value::makeString(kv.second);
+    (*result.cex().object)["headers"] = headersObj;
 
     // Best-effort JSON parse of the body for `.json` access; on failure,
     // `.json` becomes null rather than throwing, since not every response is JSON.
     try {
         if(!resp.body.empty()) {
             Value parsed = parseJsonString(resp.body);
-            (*result.object)["json"] = parsed;
+            (*result.cex().object)["json"] = parsed;
         } else {
-            (*result.object)["json"] = Value::makeNull();
+            (*result.cex().object)["json"] = Value::makeNull();
         }
     } catch(...) {
-        (*result.object)["json"] = Value::makeNull();
+        (*result.cex().object)["json"] = Value::makeNull();
     }
 
     return result;
@@ -2916,9 +4353,9 @@ Value evalMemberAccess(const std::shared_ptr<MemberAccessExpr>& m) {
     Value obj = evalToValue(m->base);
 
     if(obj.isStruct) {
-        auto it = obj.fields->find(m->member);
-        if(it == obj.fields->end())
-            throw std::runtime_error("Struct '" + obj.structType + "' has no field '" + m->member + "'");
+        auto it = obj.cex().fields->find(m->member);
+        if(it == obj.cex().fields->end())
+            throw std::runtime_error("Struct '" + obj.cex().structType + "' has no field '" + m->member + "'");
         Value field = it->second;
         if(m->index) {
             if(!field.isArray)
@@ -2933,20 +4370,20 @@ Value evalMemberAccess(const std::shared_ptr<MemberAccessExpr>& m) {
     }
 
     if(obj.isObject) {
-        if(obj.isObjectArray)
+        if(obj.cex().isObjectArray)
             throw std::runtime_error("Cannot access member '" + m->member + "' on a JSON array (index it with [i] instead)");
-        auto it = obj.object->find(m->member);
-        if(it == obj.object->end()) {
-            if(obj.isLenientMap) return Value::makeString(""); // e.g. request.query.missingKey -> ""
+        auto it = obj.cex().object->find(m->member);
+        if(it == obj.cex().object->end()) {
+            if(obj.cex().isLenientMap) return Value::makeString(""); // e.g. request.query.missingKey -> ""
             throw std::runtime_error("Object has no field '" + m->member + "'");
         }
         Value field = it->second;
         if(m->index) {
-            if(field.isObject && field.isObjectArray) {
+            if(field.isObject && field.cex().isObjectArray) {
                 int idx = (int)evalNumber(m->index);
-                if(idx < 0 || idx >= (int)field.objectArray->size())
+                if(idx < 0 || idx >= (int)field.cex().objectArray->size())
                     throw std::runtime_error("Array index out of bounds for field '" + m->member + "': " + std::to_string(idx));
-                return (*field.objectArray)[idx];
+                return (*field.cex().objectArray)[idx];
             }
             if(field.isObject) {
                 // String-keyed lookup, e.g. request.header["Authorization"] or
@@ -2954,8 +4391,8 @@ Value evalMemberAccess(const std::shared_ptr<MemberAccessExpr>& m) {
                 // index expression is a string key rather than a numeric position.
                 Value keyVal = evalToValue(m->index);
                 std::string key = valueToDisplayString(keyVal);
-                auto fit = field.object->find(key);
-                if(fit == field.object->end()) return Value::makeString(""); // absent header/cookie -> empty string
+                auto fit = field.cex().object->find(key);
+                if(fit == field.cex().object->end()) return Value::makeString(""); // absent header/cookie -> empty string
                 return fit->second;
             }
             if(field.isArray) {
@@ -3011,8 +4448,6 @@ Value spawnThread(const std::shared_ptr<ThreadExpr>& t) {
         std::string errMsg;
         try {
             result = worker.callFunction(fnCopy, const_cast<std::vector<Value>&>(argVals));
-        } catch(ReturnSignal& r) {
-            result = r.value;
         } catch(const std::exception& e) {
             errored = true;
             errMsg = e.what();
@@ -3028,7 +4463,7 @@ Value spawnThread(const std::shared_ptr<ThreadExpr>& t) {
     });
 
     Value handle;
-    handle.isThread = true;
+    handle.ex().isThread = true;
     handle.number = (double)handleId;
     return handle;
 }
@@ -3039,7 +4474,7 @@ size_t resolveThreadHandle(const ExprPtr& handleExpr) {
         idNum = evalNumber(handleExpr);
     } else {
         Value v = evalToValue(handleExpr);
-        if(!v.isThread)
+        if(!v.cex().isThread)
             throw std::runtime_error("join() called on a value that is not a thread handle");
         idNum = v.number;
     }
@@ -3100,6 +4535,8 @@ Value callCallable(const std::string& name, const std::vector<ExprPtr>& argExprs
     auto fIt = functions.find(name);
     if(fIt != functions.end()) return callFunction(fIt->second, argVals);
 
+    if(isMathBuiltinName(name)) return callMathBuiltin(name, argVals);
+
     throw std::runtime_error("Undefined function or struct '" + name + "'");
 }
 
@@ -3114,12 +4551,7 @@ Value callFunction(const FunctionDecl& fn, std::vector<Value>& args) {
     currentSelf = nullptr;
     Value result;
     try {
-        executeBlock(fn.body);
-    } catch(ReturnSignal& r) {
-        result = r.value;
-        scopes.pop_back();
-        currentSelf = prevSelf;
-        return result;
+        executeBlock(fn.body, result);
     } catch(...) {
         scopes.pop_back();
         currentSelf = prevSelf;
@@ -3136,12 +4568,12 @@ Value instantiateStruct(const StructDecl& sd, std::vector<Value>& args) {
                                   " argument(s), got " + std::to_string(args.size()));
     Value instance;
     instance.isStruct = true;
-    instance.structType = sd.name;
-    instance.fields = std::make_shared<std::unordered_map<std::string, Value>>();
+    instance.ex().structType = sd.name;
+    instance.ex().fields = std::make_shared<std::unordered_map<std::string, Value>>();
     for(auto& f : sd.fields) {
         Value fv;
         fv.isArray = f.isArray;
-        (*instance.fields)[f.name] = fv;
+        (*instance.cex().fields)[f.name] = fv;
     }
 
     scopes.push_back({});
@@ -3149,8 +4581,8 @@ Value instantiateStruct(const StructDecl& sd, std::vector<Value>& args) {
     Value* prevSelf = currentSelf;
     currentSelf = &instance;
     try {
-        executeBlock(sd.ctorBody);
-    } catch(ReturnSignal&) {
+        Value discardedReturn;
+        executeBlock(sd.ctorBody, discardedReturn);
     } catch(...) {
         scopes.pop_back();
         currentSelf = prevSelf;
@@ -3203,8 +4635,8 @@ void initDatabases(const std::unordered_map<std::string, DataDecl>& das) {
         }
 
         Value v;
-        v.isDatabase = true;
-        v.database = db;
+        v.ex().isDatabase = true;
+        v.ex().database = db;
         scopes.back()[dd.name] = v;
     }
 }
@@ -3244,7 +4676,7 @@ std::vector<uint8_t> serializeDatabase(const DatabaseInstance& db) {
         writeStr(out, t.structType);
         writeU32(out, (uint32_t)t.records.size());
         for(auto& rec : t.records) {
-            const auto& fields = *rec.fields;
+            const auto& fields = *rec.cex().fields;
             writeU32(out, (uint32_t)fields.size());
             for(auto& fkv : fields) {
                 writeStr(out, fkv.first);
@@ -3292,8 +4724,8 @@ void deserializeDatabase(DatabaseInstance& db, const std::vector<uint8_t>& in) {
         for(uint32_t r=0;r<recCount;++r) {
             Value rec;
             rec.isStruct = true;
-            rec.structType = structType;
-            rec.fields = std::make_shared<std::unordered_map<std::string, Value>>();
+            rec.ex().structType = structType;
+            rec.ex().fields = std::make_shared<std::unordered_map<std::string, Value>>();
             uint32_t fcount = readU32(in, pos);
             for(uint32_t f=0; f<fcount; ++f) {
                 std::string fname = readStr(in, pos);
@@ -3325,7 +4757,7 @@ void deserializeDatabase(DatabaseInstance& db, const std::vector<uint8_t>& in) {
                     double d; std::memcpy(&d, &bits, 8);
                     fv.number = d;
                 }
-                (*rec.fields)[fname] = fv;
+                (*rec.cex().fields)[fname] = fv;
             }
             t.records.push_back(rec);
         }
@@ -3385,9 +4817,9 @@ void loadDatabaseFile(DatabaseInstance& db) {
 
 Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
     Value& dbVal = resolveVar(dm->dataName);
-    if(!dbVal.isDatabase)
+    if(!dbVal.cex().isDatabase)
         throw std::runtime_error("'" + dm->dataName + "' is not a Data instance");
-    DatabaseInstance& db = *dbVal.database;
+    DatabaseInstance& db = *dbVal.cex().database;
     // Every Data/table operation on this instance is serialized through one
     // mutex, so concurrent Parallel{}/thread() blocks pushing/deleting on the
     // same Data instance can't race on pkIndex or interleave writes to the
@@ -3432,8 +4864,8 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
     // no primary key configured, since callers only reach here after
     // checking !table.primaryKeyField.empty().
     auto pkOf = [&](const Value& rec) -> std::string {
-        auto it = rec.fields->find(table.primaryKeyField);
-        if(it == rec.fields->end())
+        auto it = rec.cex().fields->find(table.primaryKeyField);
+        if(it == rec.cex().fields->end())
             throw std::runtime_error("Record is missing primary key field '" + table.primaryKeyField + "'");
         return valueToDisplayString(it->second);
     };
@@ -3460,7 +4892,7 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
         Value result; result.isArray = true;
         for(size_t i=0;i<table.records.size();++i) {
             bool matched = false;
-            for(auto& fkv : *table.records[i].fields) {
+            for(auto& fkv : *table.records[i].cex().fields) {
                 std::string fieldStr = valueToDisplayString(fkv.second);
                 if(fieldStr.find(needle) != std::string::npos) { matched = true; break; }
             }
@@ -3478,8 +4910,8 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
         std::string target = valueToDisplayString(evalToValue(dm->args[1]));
         Value result; result.isArray = true;
         for(size_t i=0;i<table.records.size();++i) {
-            auto it = table.records[i].fields->find(fieldName);
-            if(it == table.records[i].fields->end()) continue;
+            auto it = table.records[i].cex().fields->find(fieldName);
+            if(it == table.records[i].cex().fields->end()) continue;
             if(valueToDisplayString(it->second) == target) result.array.push_back((double)i);
         }
         return result;
@@ -3538,8 +4970,8 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
         std::string target = valueToDisplayString(evalToValue(dm->args[1]));
         int deleted = 0;
         for(int i=(int)table.records.size()-1; i>=0; --i) {
-            auto it = table.records[i].fields->find(fieldName);
-            if(it == table.records[i].fields->end()) continue;
+            auto it = table.records[i].cex().fields->find(fieldName);
+            if(it == table.records[i].cex().fields->end()) continue;
             if(valueToDisplayString(it->second) == target) {
                 table.records.erase(table.records.begin()+i);
                 deleted++;
@@ -3570,13 +5002,13 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
             throw std::runtime_error("table.insert(): index out of bounds: " + std::to_string(idx));
         std::string fieldName = valueToDisplayString(evalToValue(dm->args[1]));
         Value newVal = evalToValue(dm->args[2]);
-        auto& fields = *table.records[idx].fields;
+        auto& fields = *table.records[idx].cex().fields;
         auto fit = fields.find(fieldName);
         if(fit == fields.end())
             throw std::runtime_error("table.insert(): struct '" + table.structType + "' has no field '" + fieldName + "'");
         if(!table.primaryKeyField.empty() && fieldName == table.primaryKeyField)
             throw std::runtime_error("table.insert(): cannot modify primary key field '" + fieldName + "' via insert(); use updateById() on a non-key field instead");
-        fit->second = newVal;
+        fit->second = std::move(newVal);
         saveDatabaseFile(db);
         return Value::makeNull();
     }
@@ -3593,11 +5025,11 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
             throw std::runtime_error("table.updateWhere(): cannot modify primary key field '" + targetField + "'");
         int updated = 0;
         for(auto& rec : table.records) {
-            auto it = rec.fields->find(fieldName);
-            if(it == rec.fields->end()) continue;
+            auto it = rec.cex().fields->find(fieldName);
+            if(it == rec.cex().fields->end()) continue;
             if(valueToDisplayString(it->second) != matchValue) continue;
-            auto tit = rec.fields->find(targetField);
-            if(tit == rec.fields->end())
+            auto tit = rec.cex().fields->find(targetField);
+            if(tit == rec.cex().fields->end())
                 throw std::runtime_error("table.updateWhere(): struct '" + table.structType + "' has no field '" + targetField + "'");
             tit->second = newVal;
             updated++;
@@ -3618,11 +5050,11 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
         auto it = table.pkIndex.find(pk);
         if(it == table.pkIndex.end())
             throw std::runtime_error("table.updateById(): no record with " + table.primaryKeyField + "='" + pk + "'");
-        auto& fields = *table.records[it->second].fields;
+        auto& fields = *table.records[it->second].cex().fields;
         auto fit = fields.find(fieldName);
         if(fit == fields.end())
             throw std::runtime_error("table.updateById(): struct '" + table.structType + "' has no field '" + fieldName + "'");
-        fit->second = newVal;
+        fit->second = std::move(newVal);
         saveDatabaseFile(db);
         return Value::makeNull();
     }
@@ -3643,9 +5075,9 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
         std::vector<size_t> idx(table.records.size());
         for(size_t i=0;i<idx.size();++i) idx[i]=i;
         std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
-            auto ia = table.records[a].fields->find(fieldName);
-            auto ib = table.records[b].fields->find(fieldName);
-            if(ia == table.records[a].fields->end() || ib == table.records[b].fields->end())
+            auto ia = table.records[a].cex().fields->find(fieldName);
+            auto ib = table.records[b].cex().fields->find(fieldName);
+            if(ia == table.records[a].cex().fields->end() || ib == table.records[b].cex().fields->end())
                 throw std::runtime_error("table.orderBy(): struct '" + table.structType + "' has no field '" + fieldName + "'");
             const Value& va = ia->second; const Value& vb = ib->second;
             bool lt;
@@ -3663,8 +5095,16 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
     throw std::runtime_error("Unknown table method '" + dm->method + "'");
 }
 
-void executeBlock(const std::shared_ptr<BlockStmt>& block) {
-    for(auto& stmt : block->statements) execute(stmt);
+// Runs every statement in `block` in order, stopping immediately if any of
+// them executes a `return` (ExecResult::Return), and writes the returned
+// value into `returnValue`. This early-stop is what makes `return` inside
+// a nested if/while/for correctly skip the rest of the enclosing block,
+// exactly like the old throw/catch did, but via ordinary control flow.
+ExecResult executeBlock(const std::shared_ptr<BlockStmt>& block, Value& returnValue) {
+    for(auto& stmt : block->statements) {
+        if(execute(stmt, returnValue) == ExecResult::Return) return ExecResult::Return;
+    }
+    return ExecResult::Normal;
 }
 
 // Executes one matched route's body in a fresh scope with `request` and
@@ -3680,22 +5120,19 @@ std::string runServerRoute(const RegisteredRoute& route, const ParsedServerReque
     scopes.push_back({});
     scopes.back()["request"] = buildRequestValue(req, params);
     scopes.back()["response"] = Value::makeObject();
-    (*scopes.back()["response"].object)["status"] = [](){ Value v; v.number = 200; return v; }();
+    (*scopes.back()["response"].cex().object)["status"] = [](){ Value v; v.number = 200; return v; }();
 
     Value returned;
     bool hadReturn = false;
     try {
-        executeBlock(route.body);
-    } catch(ReturnSignal& r) {
-        returned = r.value;
-        hadReturn = true;
+        hadReturn = (executeBlock(route.body, returned) == ExecResult::Return);
     } catch(const std::exception& e) {
         scopes.pop_back();
         currentResponseState = prevRs;
         ServerResponseState errRs;
         errRs.status = 500;
         Value errBody = Value::makeObject();
-        (*errBody.object)["error"] = Value::makeString(e.what());
+        (*errBody.cex().object)["error"] = Value::makeString(e.what());
         return buildRawHttpResponse(errRs, errBody, true, serverName);
     }
 
@@ -3703,8 +5140,8 @@ std::string runServerRoute(const RegisteredRoute& route, const ParsedServerReque
     // object; pull it out into the response state before serializing.
     Value& responseVal = scopes.back()["response"];
     if(responseVal.isObject) {
-        auto it = responseVal.object->find("status");
-        if(it != responseVal.object->end() && !it->second.isNull) {
+        auto it = responseVal.cex().object->find("status");
+        if(it != responseVal.cex().object->end() && !it->second.isNull) {
             rs.status = it->second.isBool ? (it->second.boolean ? 1 : 0) : (int)it->second.number;
         }
     }
@@ -3773,7 +5210,7 @@ void handleServerConnection(int clientFd, std::shared_ptr<ServerInstance> server
         ServerResponseState rs;
         rs.status = pathExistsForOtherMethod ? 405 : 404;
         Value body = Value::makeObject();
-        (*body.object)["error"] = Value::makeString(pathExistsForOtherMethod ? "Method Not Allowed" : "Not Found");
+        (*body.cex().object)["error"] = Value::makeString(pathExistsForOtherMethod ? "Method Not Allowed" : "Not Found");
         responseBytes = buildRawHttpResponse(rs, body, true, serverName);
     }
 
@@ -3892,7 +5329,14 @@ bool runNodeWithRetries(const NodeDecl& node, std::string& outErrorMsg) {
         scopes.push_back({});
         pendingNodeFailFromCatch = false;
         try {
-            executeBlock(node.body);
+            // A bare `return;` inside a node body ends that attempt
+            // successfully without propagating out of the workflow (Nodes
+            // bodies aren't functions) -- so both a Normal finish and a
+            // Return status count as attempt-succeeded here; only the
+            // pendingNodeFailFromCatch check below can turn this into a
+            // retry.
+            Value discardedReturn;
+            executeBlock(node.body, discardedReturn);
             scopes.pop_back();
             if(pendingNodeFailFromCatch) {
                 // Fail() was raised and caught by a try/catch inside the body
@@ -3906,11 +5350,6 @@ bool runNodeWithRetries(const NodeDecl& node, std::string& outErrorMsg) {
         } catch(NodeFailSignal&) {
             scopes.pop_back();
             outErrorMsg = "Fail() called";
-        } catch(ReturnSignal&) {
-            // A bare `return;` inside a node body ends that attempt successfully
-            // without propagating out of the workflow (Nodes bodies aren't functions).
-            scopes.pop_back();
-            return true;
         } catch(CnrThrowSignal& t) {
             scopes.pop_back();
             outErrorMsg = t.message;
@@ -3993,15 +5432,24 @@ void runNodesWorkflow(const std::shared_ptr<NodesStmt>& s) {
     }
 }
 
-void execute(const StmtPtr& stmt)
+ExecResult execute(const StmtPtr& stmt, Value& returnValue)
 {
-    if(auto s = std::dynamic_pointer_cast<TryCatchStmt>(stmt)) {
-        // ReturnSignal is intentionally NOT caught here -- `return;` inside a
-        // try block still returns from the enclosing function normally.
+    // Tag dispatch: switch on the statement's kind instead of trying every
+    // std::dynamic_pointer_cast<T> in sequence (this chain, run for every
+    // statement of every loop iteration, was one of the two dominant costs
+    // identified by profiling). Each case body is unchanged from the
+    // original; only the cast mechanism changed.
+    switch(stmt->kind) {
+    case StmtKind::TryCatch: {
+        auto s = static_cast<TryCatchStmt*>(stmt.get());
+        // A `return;` inside a try block still returns from the enclosing
+        // function normally -- so if executeBlock(tryBlock) reports Return,
+        // we propagate that status upward immediately without touching the
+        // catch block, matching the old "ReturnSignal not caught here"
+        // behavior.
+        ExecResult r = ExecResult::Normal;
         try {
-            executeBlock(s->tryBlock);
-        } catch(ReturnSignal&) {
-            throw;
+            r = executeBlock(s->tryBlock, returnValue);
         } catch(NodeFailSignal&) {
             // Fail() caught by a try/catch inside a Nodes node body: run the
             // catch block as normal, but remember that Fail() happened so the
@@ -4009,26 +5457,31 @@ void execute(const StmtPtr& stmt)
             pendingNodeFailFromCatch = true;
             scopes.push_back({});
             scopes.back()[s->catchVarName] = Value::makeString("Fail() called");
-            executeBlock(s->catchBlock);
+            r = executeBlock(s->catchBlock, returnValue);
             scopes.pop_back();
+            return r;
         } catch(CnrThrowSignal& t) {
             scopes.push_back({});
             scopes.back()[s->catchVarName] = Value::makeString(t.message);
-            executeBlock(s->catchBlock);
+            r = executeBlock(s->catchBlock, returnValue);
             scopes.pop_back();
+            return r;
         } catch(const std::exception& e) {
             scopes.push_back({});
             scopes.back()[s->catchVarName] = Value::makeString(e.what());
-            executeBlock(s->catchBlock);
+            r = executeBlock(s->catchBlock, returnValue);
             scopes.pop_back();
+            return r;
         }
-        return;
+        return r;
     }
-    if(auto s = std::dynamic_pointer_cast<NodesStmt>(stmt)) {
+    case StmtKind::Nodes: {
+        auto s = std::static_pointer_cast<NodesStmt>(stmt);
         runNodesWorkflow(s);
-        return;
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<ParallelStmt>(stmt)) {
+    case StmtKind::Parallel: {
+        auto s = static_cast<ParallelStmt*>(stmt.get());
         auto functionsCopy = functions;
         auto structsCopy = structs;
         auto reg = threadRegistry;
@@ -4044,8 +5497,8 @@ void execute(const StmtPtr& stmt)
                 worker.threadRegistry = reg;
                 worker.registryMtx = regMtx;
                 try {
-                    worker.executeBlock(block);
-                } catch(ReturnSignal&) {
+                    Value discardedReturn;
+                    worker.executeBlock(block, discardedReturn);
                 } catch(const std::exception& e) {
                     std::lock_guard<std::mutex> lock(*errMtx);
                     errors->push_back(e.what());
@@ -4058,44 +5511,62 @@ void execute(const StmtPtr& stmt)
         for(auto& w : workers) w.join();
         if(!errors->empty())
             throw std::runtime_error("Parallel block error: " + (*errors)[0]);
-        return;
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<VarDeclStmt>(stmt)) {
+    case StmtKind::VarDecl: {
+        auto s = static_cast<VarDeclStmt*>(stmt.get());
         Value value;
         value.isArray = s->isArray;
-        if(s->isArray) {
+        if(s->tensorRank >= 2) {
+            value = buildTensorFromLiteral(s->nestedInit);
+        } else if(s->isArray) {
             for(auto& e : s->arrayValues) value.array.push_back(evalNumber(e));
         } else {
             value = evalToValue(s->value);
         }
         scopes.back()[s->name]=value;
-        return;
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<AssignStmt>(stmt)) {
+    case StmtKind::Assign: {
+        auto s = static_cast<AssignStmt*>(stmt.get());
         Value& val = resolveVar(s->name);
         if(val.isArray)
             throw std::runtime_error("Cannot assign a number to array '" + s->name + "'");
         Value newVal = evalToValue(s->value);
-        val = newVal;
-        return;
+        val = std::move(newVal);
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<ArrayAssignStmt>(stmt)) {
+    case StmtKind::ArrayAssign: {
+        auto s = static_cast<ArrayAssignStmt*>(stmt.get());
         Value& val = resolveVar(s->arrayName);
         if(!val.isArray)
             throw std::runtime_error("'" + s->arrayName + "' is not an array");
+        if(!s->indices.empty()) {
+            if(val.dims.empty())
+                throw std::runtime_error("'" + s->arrayName + "' is not a Matrix/Tensor");
+            std::vector<int> idx;
+            for(auto& e : s->indices) idx.push_back((int)evalNumber(e));
+            if(idx.size() != val.dims.size())
+                throw std::runtime_error("'" + s->arrayName + "' needs " + std::to_string(val.dims.size()) + " index/indices to assign a scalar, got " + std::to_string(idx.size()));
+            tensorSetScalar(val, idx, evalNumber(s->value));
+            return ExecResult::Normal;
+        }
         int index = (int)evalNumber(s->index);
+        if(!val.dims.empty())
+            throw std::runtime_error("'" + s->arrayName + "' is a Matrix/Tensor and needs " + std::to_string(val.dims.size()) + " index/indices, e.g. " + s->arrayName + "[" + std::to_string(index) + "]" + std::string(val.dims.size()>1 ? "[...]" : "") + " = value;");
         if(index < 0 || index >= (int)val.array.size())
             throw std::runtime_error("Array index out of bounds for '" + s->arrayName + "': " + std::to_string(index));
         val.array[index] = evalNumber(s->value);
-        return;
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<MemberAssignStmt>(stmt)) {
+    case StmtKind::MemberAssign: {
+        auto s = static_cast<MemberAssignStmt*>(stmt.get());
         Value& obj = resolveVar(s->objectName);
-        if(obj.isObject && !obj.isObjectArray) {
+        if(obj.isObject && !obj.cex().isObjectArray) {
             // Dynamic object field assignment (e.g. response.status = 200;
             // response.headersToSend["X"] = "Y";). Creates the field if absent,
             // matching object-literal semantics elsewhere in the language.
-            Value& field = (*obj.object)[s->member];
+            Value& field = (*obj.cex().object)[s->member];
             if(s->index) {
                 if(!field.isArray)
                     throw std::runtime_error("Field '" + s->member + "' is not an array");
@@ -4106,13 +5577,13 @@ void execute(const StmtPtr& stmt)
             } else {
                 field = evalToValue(s->value);
             }
-            return;
+            return ExecResult::Normal;
         }
         if(!obj.isStruct)
             throw std::runtime_error("'" + s->objectName + "' is not a struct instance or object");
-        auto it = obj.fields->find(s->member);
-        if(it == obj.fields->end())
-            throw std::runtime_error("Struct '" + obj.structType + "' has no field '" + s->member + "'");
+        auto it = obj.cex().fields->find(s->member);
+        if(it == obj.cex().fields->end())
+            throw std::runtime_error("Struct '" + obj.cex().structType + "' has no field '" + s->member + "'");
         Value& field = it->second;
         if(s->index) {
             if(!field.isArray)
@@ -4125,62 +5596,78 @@ void execute(const StmtPtr& stmt)
             if(field.isArray)
                 throw std::runtime_error("Cannot assign a number to array field '" + s->member + "'");
             Value newVal = evalToValue(s->value);
-            field = newVal;
+            field = std::move(newVal);
         }
-        return;
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<PrintStmt>(stmt)) {
+    case StmtKind::Print: {
+        auto s = static_cast<PrintStmt*>(stmt.get());
         if(s->printCharArray) {
             auto& arr = resolveVar(s->arrayName).array;
             for(double c : arr) std::cout << (char)c;
             std::cout << '\n';
-            return;
+            return ExecResult::Normal;
         }
-        if(s->printChar) { std::cout << (char)evalNumber(s->expr); return; }
+        if(s->printChar) { std::cout << (char)evalNumber(s->expr); return ExecResult::Normal; }
         Value v = evalToValue(s->expr);
         std::cout << valueToDisplayString(v) << '\n';
-        return;
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<IfStmt>(stmt)) {
-        if(evalBool(s->condition)) executeBlock(s->thenBlock);
-        else if(s->elseBlock) executeBlock(s->elseBlock);
-        return;
+    case StmtKind::If: {
+        auto s = static_cast<IfStmt*>(stmt.get());
+        if(evalBool(s->condition)) return executeBlock(s->thenBlock, returnValue);
+        else if(s->elseBlock) return executeBlock(s->elseBlock, returnValue);
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<WhileStmt>(stmt)) {
-        while(evalBool(s->condition)) executeBlock(s->body);
-        return;
+    case StmtKind::While: {
+        auto s = static_cast<WhileStmt*>(stmt.get());
+        while(evalBool(s->condition)) {
+            if(executeBlock(s->body, returnValue) == ExecResult::Return) return ExecResult::Return;
+        }
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<ForStmt>(stmt)) {
-        execute(s->init);
-        while(evalBool(s->condition)) { executeBlock(s->body); execute(s->increment); }
-        return;
+    case StmtKind::For: {
+        auto s = static_cast<ForStmt*>(stmt.get());
+        execute(s->init, returnValue);
+        while(evalBool(s->condition)) {
+            if(executeBlock(s->body, returnValue) == ExecResult::Return) return ExecResult::Return;
+            execute(s->increment, returnValue);
+        }
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<ReturnStmt>(stmt)) {
-        ReturnSignal sig;
-        if(s->value) sig.value = evalToValue(s->value);
-        throw sig;
+    case StmtKind::Return: {
+        auto s = static_cast<ReturnStmt*>(stmt.get());
+        if(s->value) returnValue = evalToValue(s->value);
+        else returnValue = Value();
+        return ExecResult::Return;
     }
-    if(auto s = std::dynamic_pointer_cast<ExprStmt>(stmt)) {
+    case StmtKind::ExprS: {
+        auto s = static_cast<ExprStmt*>(stmt.get());
         evalToValue(s->expr);
-        return;
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<RouteDeclStmt>(stmt)) {
+    case StmtKind::RouteDecl: {
+        auto s = static_cast<RouteDeclStmt*>(stmt.get());
         Value& serverVal = resolveVar(s->serverName);
-        if(!serverVal.isServer)
+        if(!serverVal.cex().isServer)
             throw std::runtime_error("'" + s->serverName + "' is not a Server instance");
         RegisteredRoute route;
         route.method = s->method;
         route.pathPattern = valueToDisplayString(evalToValue(s->pathExpr));
         route.body = s->body;
-        serverVal.server->routes.push_back(route);
-        return;
+        serverVal.cex().server->routes.push_back(route);
+        return ExecResult::Normal;
     }
-    if(auto s = std::dynamic_pointer_cast<ServerStartStmt>(stmt)) {
+    case StmtKind::ServerStart: {
+        auto s = static_cast<ServerStartStmt*>(stmt.get());
         Value& serverVal = resolveVar(s->serverName);
-        if(!serverVal.isServer)
+        if(!serverVal.cex().isServer)
             throw std::runtime_error("'" + s->serverName + "' is not a Server instance");
-        runServerLoop(serverVal.server);
-        return;
+        runServerLoop(serverVal.cex().server);
+        return ExecResult::Normal;
+    }
+    default:
+        break;
     }
     throw std::runtime_error("Unknown statement.");
 }
@@ -4189,10 +5676,8 @@ void execute(const StmtPtr& stmt)
 void runProgram(const Program& program)
 {
     Interpreter interpreter(program.functions, program.structs, program.datas);
-    try {
-        for(auto& stmt : program.statements) interpreter.execute(stmt);
-    } catch(ReturnSignal&) {
-    }
+    Value discardedReturn;
+    for(auto& stmt : program.statements) interpreter.execute(stmt, discardedReturn);
 }
 
 std::string loadFile(const std::string& path)

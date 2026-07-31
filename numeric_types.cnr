@@ -1,0 +1,51 @@
+// ==========================================================
+// Example: Int, long, BigInt, Float, BigFloat / bigDouble
+// ==========================================================
+
+print("--- Int (32 bits, C-style overflow) ---");
+var a = (Int)2000000000;
+var b = (Int)2000000000;
+print(a + b); // overflows 32 bits and wraps around, just like in C
+
+print("--- long (64 bits, exact) ---");
+var c = (long)9000000000;
+var d = (long)9000000000;
+print(c + d); // fits comfortably in 64 bits
+
+print("--- Float (32 bits) ---");
+var f = (Float)0.1 + (Float)0.2;
+print(f);
+
+print("--- BigInt (real arbitrary precision) ---");
+var fact = (BigInt)1;
+var i = (BigInt)1;
+while(i <= (BigInt)30) {
+    fact = fact * i;
+    i = i + (BigInt)1;
+}
+print(fact); // 30! -- doesn't even fit in a long, but fits in BigInt
+
+var big1 = (BigInt)123456789012345678901234567890;
+var big2 = (BigInt)987654321;
+print(big1 / big2);
+print(big1 % big2);
+
+print("--- BigFloat / bigDouble (long double, more precise than double) ---");
+var bf = (BigFloat)1.0 / (BigFloat)3.0;
+print(bf);
+var bd = (bigDouble)2.0 / (bigDouble)7.0; // bigDouble is just an alias for BigFloat
+print(bd);
+
+print("--- mixing a typed value with a plain number (promotes to the stronger type) ---");
+var mix = (BigInt)10 + 5;
+print(mix);
+
+print("--- comparing huge BigInt values ---");
+if((BigInt)999999999999999999999 > (BigInt)999999999999999999998) {
+    print("BigInt compares correctly");
+}
+
+print("--- an untyped var still behaves exactly as before (plain double) ---");
+var old = 5;
+var old2 = 2;
+print(old / old2); // 2.5, same behavior as always

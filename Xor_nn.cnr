@@ -1,0 +1,196 @@
+// xor_nn.CnR
+// A tiny feedforward neural network trained with backpropagation to learn
+// the XOR function. Architecture: 2 inputs -> 2 hidden neurons (sigmoid)
+// -> 1 output neuron (sigmoid), trained with plain gradient descent.
+//
+// Uses the new Matrix type for weights (var[][]) and plain arrays (var[])
+// for biases/activations/deltas.
+
+// ---------------------------------------------------------------------
+// Helper: plain 1-D arrays (var[]) print as "[array]" (only Matrix/Tensor
+// values print their contents), so this renders one out manually.
+// ---------------------------------------------------------------------
+function printArray(var arr) {
+    var out = "[";
+    for (var i = 0; i < len(arr); i = i + 1) {
+        out = out + arr[i];
+        if (i < len(arr) - 1) {
+            out = out + ", ";
+        }
+    }
+    out = out + "]";
+    print(out);
+}
+
+randomSeed(42);
+
+// ---------------------------------------------------------------------
+// Hyperparameters
+// ---------------------------------------------------------------------
+var learningRate = 0.5;
+var epochs = 3000;
+var hiddenSize = 2;
+var inputSize = 2;
+var outputSize = 1;
+
+// ---------------------------------------------------------------------
+// Activation function: sigmoid and its derivative (given sigmoid(x), not x)
+// ---------------------------------------------------------------------
+function sigmoid(var x) {
+    return 1 / (1 + exp(0 - x));
+}
+
+function sigmoidDerivative(var sigmoidX) {
+    return sigmoidX * (1 - sigmoidX);
+}
+
+// ---------------------------------------------------------------------
+// Weight initialization: small random values in [-1, 1]
+// W1: inputSize x hiddenSize, W2: hiddenSize x outputSize
+// ---------------------------------------------------------------------
+var[][] W1 = {{0,0},{0,0}};
+var[] b1 = {0, 0};
+var[][] W2 = {{0},{0}};
+var[] b2 = {0};
+
+function initWeights() {
+    for (var i = 0; i < inputSize; i = i + 1) {
+        for (var j = 0; j < hiddenSize; j = j + 1) {
+            W1[i][j] = random(-1, 1);
+        }
+    }
+    for (var j = 0; j < hiddenSize; j = j + 1) {
+        b1[j] = random(-1, 1);
+    }
+    for (var j = 0; j < hiddenSize; j = j + 1) {
+        for (var k = 0; k < outputSize; k = k + 1) {
+            W2[j][k] = random(-1, 1);
+        }
+    }
+    for (var k = 0; k < outputSize; k = k + 1) {
+        b2[k] = random(-1, 1);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Training data: XOR truth table
+// ---------------------------------------------------------------------
+var[][] X = {{0,0},{0,1},{1,0},{1,1}};
+var[] Y = {0, 1, 1, 0};
+
+// ---------------------------------------------------------------------
+// Cached activations from the most recent forward pass (needed by
+// backward() to compute gradients without recomputing the forward pass).
+// ---------------------------------------------------------------------
+var[] hidden = {0, 0};
+var[] output = {0};
+
+// Forward pass for a single input row (array of length inputSize).
+// Fills `hidden` and `output` as a side effect and also returns output[0].
+function forward(var x0, var x1) {
+    for (var j = 0; j < hiddenSize; j = j + 1) {
+        var z = b1[j] + x0 * W1[0][j] + x1 * W1[1][j];
+        hidden[j] = sigmoid(z);
+    }
+    for (var k = 0; k < outputSize; k = k + 1) {
+        var z2 = b2[k] + hidden[0] * W2[0][k] + hidden[1] * W2[1][k];
+        output[k] = sigmoid(z2);
+    }
+    return output[0];
+}
+
+// Backward pass (backpropagation) for a single example. Uses the cached
+// `hidden`/`output` from the forward() call that must precede this, plus
+// the raw input row, and updates W1/b1/W2/b2 in place via gradient descent.
+function backward(var x0, var x1, var target) {
+    // ---- Output layer error ----
+    // dL/dz2 = (output - target) * sigmoidDerivative(output)   [MSE loss]
+    var[] outputDelta = {0};
+    for (var k = 0; k < outputSize; k = k + 1) {
+        var errorK = output[k] - target;
+        outputDelta[k] = errorK * sigmoidDerivative(output[k]);
+    }
+
+    // ---- Hidden layer error (propagate output delta back through W2) ----
+    var[] hiddenDelta = {0, 0};
+    for (var j = 0; j < hiddenSize; j = j + 1) {
+        var sum = 0;
+        for (var k = 0; k < outputSize; k = k + 1) {
+            sum = sum + outputDelta[k] * W2[j][k];
+        }
+        hiddenDelta[j] = sum * sigmoidDerivative(hidden[j]);
+    }
+
+    // ---- Update output layer weights/biases ----
+    for (var j = 0; j < hiddenSize; j = j + 1) {
+        for (var k = 0; k < outputSize; k = k + 1) {
+            W2[j][k] = W2[j][k] - learningRate * outputDelta[k] * hidden[j];
+        }
+    }
+    for (var k = 0; k < outputSize; k = k + 1) {
+        b2[k] = b2[k] - learningRate * outputDelta[k];
+    }
+
+    // ---- Update hidden layer weights/biases ----
+    var[] inputRow = {x0, x1};
+    for (var i = 0; i < inputSize; i = i + 1) {
+        for (var j = 0; j < hiddenSize; j = j + 1) {
+            W1[i][j] = W1[i][j] - learningRate * hiddenDelta[j] * inputRow[i];
+        }
+    }
+    for (var j = 0; j < hiddenSize; j = j + 1) {
+        b1[j] = b1[j] - learningRate * hiddenDelta[j];
+    }
+}
+
+// Mean squared error over the whole XOR dataset, using current weights.
+function totalLoss() {
+    var loss = 0;
+    for (var i = 0; i < len(X); i = i + 1) {
+        var row = X[i];
+        var pred = forward(row[0], row[1]);
+        var err = pred - Y[i];
+        loss = loss + err * err;
+    }
+    return loss / len(X);
+}
+
+// ---------------------------------------------------------------------
+// Training loop
+// ---------------------------------------------------------------------
+initWeights();
+
+print("== Initial weights ==");
+print(W1);
+printArray(b1);
+print(W2);
+printArray(b2);
+
+print("");
+print("== Training ==");
+for (var epoch = 0; epoch < epochs; epoch = epoch + 1) {
+    for (var i = 0; i < len(X); i = i + 1) {
+        var row = X[i];
+        forward(row[0], row[1]);
+        backward(row[0], row[1], Y[i]);
+    }
+    if (epoch % 1000 == 0) {
+        print("epoch " + epoch + "  loss: " + totalLoss());
+    }
+}
+print("epoch " + epochs + "  loss: " + totalLoss());
+
+print("");
+print("== Final predictions ==");
+for (var i = 0; i < len(X); i = i + 1) {
+    var row = X[i];
+    var pred = forward(row[0], row[1]);
+    print((string)row[0] + " XOR " + (string)row[1] + " = " + pred + "   (expected " + Y[i] + ")");
+}
+
+print("");
+print("== Final weights ==");
+print(W1);
+printArray(b1);
+print(W2);
+printArray(b2);

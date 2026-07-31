@@ -1,0 +1,38 @@
+// bigfloat_test.CnR
+// Test of BigFloat (arbitrary-precision BigDecimal) constants and functions
+
+print("== Global constants (default precision, 22 digits) ==");
+print(pi);
+print(euler);
+print(phi);
+print(psi);
+
+print("");
+print("== Same constants at higher precision via cast (BigFloat(N)) ==");
+// Note: pi/e are already fixed at 22 digits in the global variable; the cast
+// only re-converts that value, so here they still show 22 digits, not 50.
+print((BigFloat(50))pi);
+print((BigFloat(50))euler);
+
+print("");
+print("== sqroot / sqrt on BigFloat ==");
+var sqrt2 = sqrt((BigFloat(50))2);
+print(sqrt2);
+
+var sqrt3 = sqroot((BigFloat(50))3);
+print(sqrt3);
+
+print("");
+print("== Combined: circle area with BigFloat(30) ==");
+var r = (BigFloat(30))5;
+var area = pi * r * r;
+print(area);
+
+print("");
+print("== High precision on euler ==");
+print((BigFloat(15))euler);
+
+print("");
+print("== BigFloat(N) as a zero-valued number at precision N ==");
+var zero100 = BigFloat(100);
+print(zero100);
