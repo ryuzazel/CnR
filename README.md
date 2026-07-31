@@ -62,6 +62,7 @@ CnR currently supports:
 - Struct declarations with constructors and fields (`Struct`)
 
 > See `linearRegression.cnr` for a full example combining structs, functions, arrays, and loops — a linear regression model trained with gradient descent, entirely in CnR.
+
 > See `Xor_nn.cnr` for a full example of how matrices works and basic math.
 
 **Planned improvements:** more advanced function systems, better function composition, and additional language abstractions.
