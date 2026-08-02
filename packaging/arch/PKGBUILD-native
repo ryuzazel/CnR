@@ -1,0 +1,25 @@
+# Maintainer: You <you@example.com>
+# Native-tuned variant: use this ONLY for `makepkg` on the same machine you'll run it on
+# (e.g. via `yay -S --builddir . CnR-native` from a local PKGBUILD, never for AUR distribution).
+pkgname=CnR-native
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="CnR command-line tool (native -march=native build, this machine only)"
+arch=('x86_64')
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cmake' 'gcc')
+source=("CnR.cpp" "CMakeLists.txt")
+sha256sums=('SKIP' 'SKIP')
+
+build() {
+  cmake -B build -S "$srcdir" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCNR_NATIVE_ARCH=ON
+  cmake --build build --parallel
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+}

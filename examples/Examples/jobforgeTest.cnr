@@ -1,0 +1,128 @@
+// ============================================================================
+// jobforgeTest.cnr — exercises the JobForge API end-to-end
+// ----------------------------------------------------------------------------
+// Mirrors the curl calls used to test JobForge manually:
+//
+//   curl http://localhost:7070/health
+//   curl -X POST http://localhost:7070/jobs -d '{"data":[2,4,4,4,5,5,7,9]}'
+//   curl http://localhost:7070/jobs/1
+//   curl -X POST http://localhost:7070/jobs -d '{"data":[100,200,150,175,125]}'
+//   curl http://localhost:7070/jobs/2
+//   curl http://localhost:7070/jobs
+//   curl -X POST http://localhost:7070/jobs -d '{"data":[]}'
+//   curl http://localhost:7070/jobs/999
+//
+// Run JobForge first (./cnr jobforge.cnr), then run this against it:
+//   ./cnr jobforgeTest.cnr
+//
+// Array literals ({1,2,3}) only exist in `var[] name = {...};` declarations,
+// not as a general expression -- so each payload is built as a var[] first
+// (via push) and then referenced by name inside the Http body{} block.
+// ============================================================================
+
+var baseUrl = "http://localhost:7070";
+
+// ----------------------------------------------------------------------------
+// GET /health
+// ----------------------------------------------------------------------------
+print("== GET /health ==");
+var health = Http.GET(baseUrl + "/health");
+print(health.status);
+print((string)health.body);
+print("");
+
+// ----------------------------------------------------------------------------
+// POST /jobs — job 1
+// ----------------------------------------------------------------------------
+print("== POST /jobs (job 1) ==");
+var[] payload1;
+payload1.push(2); payload1.push(4); payload1.push(4); payload1.push(4);
+payload1.push(5); payload1.push(5); payload1.push(7); payload1.push(9);
+
+var job1 = Http.POST(baseUrl + "/jobs") {
+    header {
+        "Content-Type" = "application/json";
+    }
+    body {
+        "data" = payload1;
+    }
+};
+print(job1.status);
+print((string)job1.body);
+print("");
+
+// ----------------------------------------------------------------------------
+// GET /jobs/1
+// ----------------------------------------------------------------------------
+print("== GET /jobs/1 ==");
+var getJob1 = Http.GET(baseUrl + "/jobs/1");
+print(getJob1.status);
+print((string)getJob1.body);
+print("");
+
+// ----------------------------------------------------------------------------
+// POST /jobs — job 2
+// ----------------------------------------------------------------------------
+print("== POST /jobs (job 2) ==");
+var[] payload2;
+payload2.push(100); payload2.push(200); payload2.push(150);
+payload2.push(175); payload2.push(125);
+
+var job2 = Http.POST(baseUrl + "/jobs") {
+    header {
+        "Content-Type" = "application/json";
+    }
+    body {
+        "data" = payload2;
+    }
+};
+print(job2.status);
+print((string)job2.body);
+print("");
+
+// ----------------------------------------------------------------------------
+// GET /jobs/2
+// ----------------------------------------------------------------------------
+print("== GET /jobs/2 ==");
+var getJob2 = Http.GET(baseUrl + "/jobs/2");
+print(getJob2.status);
+print((string)getJob2.body);
+print("");
+
+// ----------------------------------------------------------------------------
+// GET /jobs — list all
+// ----------------------------------------------------------------------------
+print("== GET /jobs (list) ==");
+var jobList = Http.GET(baseUrl + "/jobs");
+print(jobList.status);
+print((string)jobList.body);
+print("");
+
+// ----------------------------------------------------------------------------
+// POST /jobs — empty payload (failure path)
+// ----------------------------------------------------------------------------
+print("== POST /jobs (empty payload, expect failure) ==");
+var[] emptyPayload;
+
+var failJob = Http.POST(baseUrl + "/jobs") {
+    header {
+        "Content-Type" = "application/json";
+    }
+    body {
+        "data" = emptyPayload;
+    }
+};
+print(failJob.status);
+print((string)failJob.body);
+print("");
+
+// ----------------------------------------------------------------------------
+// GET /jobs/999 — nonexistent id (expect 404)
+// ----------------------------------------------------------------------------
+print("== GET /jobs/999 (expect 404) ==");
+var notFound = Http.GET(baseUrl + "/jobs/999");
+print(notFound.status);
+print((string)notFound.body);
+print("");
+
+print("== done ==");

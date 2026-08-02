@@ -1,0 +1,24 @@
+# Maintainer: You <you@example.com>
+pkgname=CnR
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="CnR command-line tool"
+arch=('x86_64')
+url="https://example.com/CnR"
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cmake' 'gcc')
+source=("CnR.cpp" "CMakeLists.txt")
+sha256sums=('SKIP' 'SKIP')  # replace with real hashes, or use a git source array instead
+
+build() {
+  cmake -B build -S "$srcdir" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCNR_NATIVE_ARCH=OFF   # portable build for distribution; AUR builds run on users' machines with unknown CPUs
+  cmake --build build --parallel
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+}

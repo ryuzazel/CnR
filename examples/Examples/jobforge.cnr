@@ -1,0 +1,234 @@
+// ============================================================================
+// JobForge — async job orchestrator
+// ----------------------------------------------------------------------------
+// HTTP API + native .cnrdb persistence + Nodes (DAG) pipeline execution.
+//
+// POST /jobs        -> accepts { "data": [numbers...] }, runs a 3-stage
+//                       DAG pipeline (Validate -> ComputeMean -> ComputeStd),
+//                       persists the job + result, returns the finished job.
+// GET  /jobs/:id     -> fetch a single job by id.
+// GET  /jobs         -> list all jobs (id + status only).
+//
+// Design notes:
+//  - Job ids are derived from JobDB.jobs.count() + 1 rather than a mutable
+//    global counter, since route handlers don't see outer `var` globals.
+//  - JSON array bodies (request.json.data) can only be indexed directly
+//    inline in the route handler (json.data[i]) -- passing them into a
+//    helper function and indexing there does not work in this interpreter
+//    build, so the flatten-to-native-array loop lives right here.
+//  - Nodes steps mutate variables declared in the enclosing route-handler
+//    scope (sum/mean/variance/stddev) via CnR's sharedScope mechanism.
+// ============================================================================
+
+Data JobDB("jobforge") {
+    Struct Job {
+        var id;
+        var status;
+        var count;
+        var mean;
+        var stddev;
+        var minVal;
+        var maxVal;
+        var sumVal;
+        var error;
+
+        Job(var i, var s) {
+            id = i;
+            status = s;
+            count = 0;
+            mean = 0;
+            stddev = 0;
+            minVal = 0;
+            maxVal = 0;
+            sumVal = 0;
+            error = "";
+        }
+    }
+    table Job jobs primaryKey id;
+}
+
+var server = Server() {
+    host = "0.0.0.0";
+    port = 7070;
+    https = false;
+    threads = 8;
+    backlog = 1024;
+    keepAlive = true;
+    readTimeout = 30;
+    writeTimeout = 30;
+    serverName = "JobForge";
+    logRequests = true;
+};
+
+// ----------------------------------------------------------------------------
+// POST /jobs — submit a new job
+// ----------------------------------------------------------------------------
+server.POST("/jobs") {
+    var json = request.json;
+
+    // Flatten the JSON array body into a native var[] we can compute over.
+    // Must be done inline (see design note above).
+    var[] data;
+    var idx = 0;
+    var reading = true;
+    while (reading) {
+        try {
+            var v = json.data[idx];
+            data.push(v);
+            idx = idx + 1;
+        } catch(var e) {
+            reading = false;
+        }
+    }
+
+    var jobId = JobDB.jobs.count() + 1;
+    JobDB.jobs.push(jobId, "processing");
+
+    var n = len(data);
+    var sum = 0;
+    var mean = 0;
+    var variance = 0;
+    var stddev = 0;
+    var minVal = 0;
+    var maxVal = 0;
+    var failed = false;
+    var errMsg = "";
+
+    try {
+        Nodes JobPipeline {
+
+            // Stage 1: reject empty payloads before doing any work.
+            Validate() {
+                if (n == 0) {
+                    Fail();
+                }
+            };
+
+            // Stage 2: sum, mean, min, max -- depends on Validate.
+            ComputeStats(Validate) {
+                var k = 0;
+                minVal = data[0];
+                maxVal = data[0];
+                while (k < n) {
+                    var v = data[k];
+                    sum = sum + v;
+                    if (v < minVal) { minVal = v; }
+                    if (v > maxVal) { maxVal = v; }
+                    k = k + 1;
+                }
+                mean = sum / n;
+            };
+
+            // Stage 3: standard deviation -- depends on ComputeStats (needs mean).
+            ComputeStd(ComputeStats) -> OnFail(Retry = 2) {
+                var k = 0;
+                var acc = 0;
+                while (k < n) {
+                    var diff = data[k] - mean;
+                    acc = acc + diff * diff;
+                    k = k + 1;
+                }
+                variance = acc / n;
+                stddev = sqrt(variance);
+            };
+        }
+    } catch(var pipeErr) {
+        failed = true;
+        errMsg = pipeErr;
+    }
+
+    if (failed || n == 0) {
+        JobDB.jobs.updateById(jobId, "status", "failed");
+        JobDB.jobs.updateById(jobId, "error", "empty or invalid payload");
+        JobDB.jobs.save();
+
+        response.status = 422;
+        response.header("Content-Type", "application/json");
+        return { "jobId": jobId, "status": "failed", "error": "empty or invalid payload" };
+    }
+
+    JobDB.jobs.updateById(jobId, "status", "done");
+    JobDB.jobs.updateById(jobId, "count", n);
+    JobDB.jobs.updateById(jobId, "mean", mean);
+    JobDB.jobs.updateById(jobId, "stddev", stddev);
+    JobDB.jobs.updateById(jobId, "minVal", minVal);
+    JobDB.jobs.updateById(jobId, "maxVal", maxVal);
+    JobDB.jobs.updateById(jobId, "sumVal", sum);
+    JobDB.jobs.save();
+
+    response.status = 201;
+    response.header("Content-Type", "application/json");
+    return {
+        "jobId": jobId,
+        "status": "done",
+        "count": n,
+        "sum": sum,
+        "mean": mean,
+        "stddev": stddev,
+        "min": minVal,
+        "max": maxVal
+    };
+};
+
+// ----------------------------------------------------------------------------
+// GET /jobs/:id — fetch one job
+// ----------------------------------------------------------------------------
+server.GET("/jobs/:id") {
+    var idNum = (Int)request.params.id;
+
+    try {
+        var job = JobDB.jobs.getById(idNum);
+        response.status = 200;
+        response.header("Content-Type", "application/json");
+        return {
+            "id": job.id,
+            "status": job.status,
+            "count": job.count,
+            "sum": job.sumVal,
+            "mean": job.mean,
+            "stddev": job.stddev,
+            "min": job.minVal,
+            "max": job.maxVal,
+            "error": job.error
+        };
+    } catch(var e) {
+        response.status = 404;
+        response.header("Content-Type", "application/json");
+        return { "error": "job not found" };
+    }
+};
+
+// ----------------------------------------------------------------------------
+// GET /jobs — list all jobs (id + status)
+// ----------------------------------------------------------------------------
+server.GET("/jobs") {
+    var total = JobDB.jobs.count();
+    var[] ids;
+    var[] statuses;
+
+    var i = 1;
+    while (i <= total) {
+        try {
+            var job = JobDB.jobs.getById(i);
+            ids.push(job.id);
+            response.status = 200;
+        } catch(var e) {
+            // id gap from a previous run -- skip it
+        }
+        i = i + 1;
+    }
+
+    response.status = 200;
+    response.header("Content-Type", "application/json");
+    return { "total": total, "ids": ids };
+};
+
+// ----------------------------------------------------------------------------
+// GET /health — simple liveness check
+// ----------------------------------------------------------------------------
+server.GET("/health") {
+    response.status = 200;
+    return { "status": "ok", "service": "JobForge" };
+};
+
+server.start();

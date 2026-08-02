@@ -104,11 +104,22 @@ For a broader tour of syntax — every operator, every loop form, `switch`, `bre
 
 ## Getting Started (Build)
 
+CnR is a unity build: `CnR.cpp` `#include`s `math_bridge.inc` and the flattened `mathlib_flat/` sources, so it compiles as a single translation unit — no extra include paths, no separate library to link, no Makefile of dependencies to track.
+
+**Manual compile:**
 ```bash
-Still making the cmake...
+g++ -std=c++17 -O3 -march=native -pthread CnR.cpp -o CnR
 ```
 
-Everything — the interpreter and the entire MathLib bridge — is unity-built from `CnR.cpp` (which pulls in `math_bridge.inc` and the flattened `mathlib_flat/` sources). No extra include paths, no separate library to link. File extension doesn't matter to the interpreter; `.cnr` and `.CnR` are both used throughout this repo's examples.
+**Or install `CnR` onto your `PATH` with the provided CMake build:**
+```bash
+./scripts/build.sh              # build + install to /usr/local/bin (sudo)
+./scripts/build.sh --user       # install to ~/.local/bin (no sudo)
+```
+
+For the zero-CMake alternative, Arch `PKGBUILD`, `.deb`/`.rpm` packages, and Windows builds (MSVC and MinGW cross-compile), see [`README-build.md`](README-build.md).
+
+File extension doesn't matter to the interpreter; `.cnr` and `.CnR` are both used throughout this repo's examples.
 
 ---
 

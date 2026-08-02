@@ -2419,6 +2419,9 @@ bool valueIsIntegral(const Value& v) {
 }
 long long valueToI64(const Value& v) {
     if(v.isBool) return v.boolean ? 1 : 0;
+    if(v.isString) {
+        try { return std::stoll(v.str); } catch(...) { return 0; }
+    }
     switch(v.numKind) {
         case NumKind::I32: case NumKind::I64: return v.i64;
         case NumKind::Big: return (long long)v.cex().big->toDouble();
@@ -2428,6 +2431,9 @@ long long valueToI64(const Value& v) {
 }
 long double valueToLongDouble(const Value& v) {
     if(v.isBool) return v.boolean ? 1.0L : 0.0L;
+    if(v.isString) {
+        try { return std::stold(v.str); } catch(...) { return 0.0L; }
+    }
     switch(v.numKind) {
         case NumKind::BigF: return v.cex().bigDec ? v.cex().bigDec->toLongDouble() : 0.0L;
         case NumKind::Big: return (long double)v.cex().big->toDouble();
@@ -4208,6 +4214,13 @@ double evalNumber(const ExprPtr& expr)
         if(!a->index)
             throw std::runtime_error("Array '" + a->arrayName + "' used without an index in this context");
         Value& val = resolveVar(a->arrayName);
+        if(val.isObject && val.cex().isObjectArray) {
+            int index = (int)evalNumber(a->index);
+            if(index < 0 || index >= (int)val.cex().objectArray->size())
+                throw std::runtime_error("Array index out of bounds for '" + a->arrayName + "': " + std::to_string(index));
+            const Value& elem = (*val.cex().objectArray)[index];
+            return elem.isBool ? (elem.boolean ? 1.0 : 0.0) : valueToApproxDouble(elem);
+        }
         if(!val.isArray)
             throw std::runtime_error("'" + a->arrayName + "' is not an array");
         int index = (int)evalNumber(a->index);
@@ -4459,6 +4472,18 @@ Value evalToValue(const ExprPtr& expr) {
         if(!a->index)
             throw std::runtime_error("Array '" + a->arrayName + "' used without an index in this context");
         Value& val = resolveVar(a->arrayName);
+        if(val.isObject && val.cex().isObjectArray) {
+            // A plain identifier holding a JSON array (e.g. a function
+            // parameter that received request.json.data) -- index into the
+            // objectArray directly, same as evalMemberAccess does for the
+            // json.data[i] form. Returns the element's raw Value (number,
+            // string, bool, or nested object/array) rather than forcing it
+            // through the numeric-only `.number` path below.
+            int index = (int)evalNumber(a->index);
+            if(index < 0 || index >= (int)val.cex().objectArray->size())
+                throw std::runtime_error("Array index out of bounds for '" + a->arrayName + "': " + std::to_string(index));
+            return (*val.cex().objectArray)[index];
+        }
         if(!val.isArray)
             throw std::runtime_error("'" + a->arrayName + "' is not an array");
         int index = (int)evalNumber(a->index);
@@ -5604,10 +5629,35 @@ void runServerLoop(std::shared_ptr<ServerInstance> server) {
         auto functionsCopy = functions;
         auto structsCopy = structs;
 
-        // Each connection gets its own Interpreter (fresh scopes), sharing
-        // only the function/struct declarations and the server's route table.
-        std::thread worker([clientFd, server, clientIp, functionsCopy, structsCopy]() mutable {
+        // Snapshot the program's top-level global scope (scopes.front()) so
+        // each connection's Interpreter starts with the same top-level `var`
+        // globals and Data/table instances visible, instead of an empty
+        // scope. Value copies are cheap and safe to share across threads:
+        // heavy payloads (objects, arrays, Data instances) live behind a
+        // shared_ptr in Value::extra, so a copied Value here still points at
+        // the same underlying DatabaseInstance (which has its own mutex) or
+        // object/array data as the original -- this mirrors how thread()/
+        // Parallel{} already share `functions`/`structs` by shared_ptr, just
+        // extended to cover global variable bindings too.
+        std::vector<std::pair<std::string, Value>> globalSnapshot;
+        {
+            Scope& g = scopes.front();
+            if(g.big) {
+                globalSnapshot.reserve(g.big->size());
+                for(auto& kv : *g.big) globalSnapshot.emplace_back(kv.first, kv.second);
+            } else {
+                globalSnapshot.reserve(g.small.size());
+                for(auto& kv : g.small) globalSnapshot.emplace_back(kv.first, kv.second);
+            }
+        }
+
+        // Each connection gets its own Interpreter (fresh call-stack scopes
+        // for locals), but shares the function/struct declarations, the
+        // server's route table, and now the top-level globals/Data
+        // instances snapshotted above.
+        std::thread worker([clientFd, server, clientIp, functionsCopy, structsCopy, globalSnapshot]() mutable {
             Interpreter connInterp(functionsCopy, structsCopy);
+            for(auto& kv : globalSnapshot) connInterp.scopes.front()[kv.first] = kv.second;
             try {
                 connInterp.handleServerConnection(clientFd, server, clientIp);
             } catch(...) {
