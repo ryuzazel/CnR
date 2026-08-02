@@ -1,0 +1,248 @@
+// ============================================================================
+// MathLib — full feature tour
+// ----------------------------------------------------------------------------
+// One pass over every distinct MathLib builtin, each shown exactly once
+// (the various example/test files under example/mathlib/ demonstrate several
+// of these more than once, sometimes with different arguments/types --
+// this file keeps just one representative demo per function).
+//
+// Sections:
+//   1. Constants
+//   2. Basic math functions (incl. BigInt exactness)
+//   3. BigFloat arithmetic
+//   4. Number theory: isPrime, divisors (Int and BigInt)
+//   5. mathDefine + function introspection (mathToString, mathDomain, ...)
+//   6. Calculus: derivative, integral, definite integral (incl. BigFloat)
+//   7. Series and limits (incl. limit at infinity)
+//   8. Sums and products
+//   9. Bijectivity and inverse
+//  10. Polynomial roots (by name and by raw coefficients)
+//  11. Linear algebra: determinant, rank, inverse, solve, eigenvalues,
+//      transpose, multiply
+//  12. Error handling (try/catch around a few of the above)
+// ============================================================================
+
+
+// ==========================================================
+// 1. Constants
+// ==========================================================
+
+print("=== 1. Constants ===");
+print(pi);
+print(euler); // same as e
+print(phi);   // golden ratio
+print(psi);   // golden ratio conjugate: phi + psi == 1, phi * psi == -1
+print(phi + psi);
+print(phi * psi);
+
+
+// ==========================================================
+// 2. Basic math functions
+// ==========================================================
+
+print("=== 2. Basic math functions ===");
+print(sqrt(2));
+print(sqroot(16));   // alias for sqrt
+print(pow(2, 10));
+print(abs(-5));
+print(floor(3.7));
+print(ceil(3.2));
+print(round(3.5));
+print(log(euler));   // natural log
+print(log10(1000));
+print(exp(1));
+print(sin(0));
+print(cos(0));
+print(arcsin(1));
+print(arccos(0));
+print(arctan(1));
+print(min(3, 7));
+print(max(3, 7));
+
+// pow() stays exact with BigInt
+print(pow((BigInt)2, 200));
+
+
+// ==========================================================
+// 3. BigFloat arithmetic
+// ==========================================================
+
+print("=== 3. BigFloat arithmetic ===");
+var radius = (BigFloat)5;
+var circumference = pi * (BigFloat)2 * radius;
+print(circumference); // extra digits, since pi and radius are BigFloat
+print(pow(euler, pi));
+
+
+// ==========================================================
+// 4. Number theory: isPrime, divisors
+// ==========================================================
+
+print("=== 4. Number theory ===");
+print(isPrime(17));
+print(isPrime(18));
+print(isPrime((BigInt)982451653));
+
+print(divisors(36));                 // plain Int
+print(divisors((BigInt)987654321));  // exact on arbitrary-precision BigInt
+
+
+// ==========================================================
+// 5. mathDefine + function introspection
+// ==========================================================
+
+print("=== 5. mathDefine + introspection ===");
+mathDefine("f(x) = sqrt(x - 2)");
+print(mathToString("f"));
+print(mathEval("f", 6));
+print(mathDomain("f"));         // auto-inferred domain, as a Set
+print(mathDomainExact("f"));    // true if that inference is exact (not sampled)
+print(mathImage("f"));          // auto-inferred image (range)
+
+
+// ==========================================================
+// 6. Calculus
+// ==========================================================
+
+print("=== 6. Calculus ===");
+mathDefine("g(x) = x^2 + 1");
+print(mathDerivative("g"));
+print(mathIntegral("g"));
+print(mathDefiniteIntegral("g", 0, 2));
+
+// BigFloat bounds -> exact BigDecimal Simpson integration for polynomials
+var a6 = (BigFloat(40))0;
+var b6 = (BigFloat(40))1;
+mathDefine("p(x) = x^2");
+print(mathDefiniteIntegral("p", a6, b6)); // 1/3 exactly, to 40 digits
+mathDefine("piQuarter(x) = sqrt(1-x^2)");
+print(mathDefiniteIntegral("piQuarter",0,1));
+
+// ==========================================================
+// 7. Series and limits
+// ==========================================================
+
+print("=== 7. Series and limits ===");
+print(mathTaylorSeries("g", 0, 4));
+
+var lim = mathLimit("g", 2);
+print(lim.value);
+print(lim.exists);
+
+// limit as x -> +infinity of 1/x (direction: +1)
+mathDefine("recip(x) = 1/x");
+var limInf = mathLimitAtInfinity("recip", 1);
+print(limInf.value);
+print(limInf.exists);
+
+
+// ==========================================================
+// 8. Sums and products
+// ==========================================================
+
+print("=== 8. Sums and products ===");
+print(mathSum("g", 1, 5));
+print(mathProduct("g", 1, 3));
+
+
+// ==========================================================
+// 9. Bijectivity and inverse
+// ==========================================================
+
+print("=== 9. Bijectivity and inverse ===");
+mathDefine("lin(x) = 2*x + 1");
+print(mathIsBijective("lin"));
+var invName = mathInverse("lin");
+print(invName);
+print(mathEval(invName, 7));
+print(mathNumericInverseAt("lin", 7)); // same answer, via root-finding
+
+
+// ==========================================================
+// 10. Polynomial roots
+// ==========================================================
+
+print("=== 10. Polynomial roots ===");
+
+// by function name (mathDefine'd polynomial)
+mathDefine("cubic(x) = x^3 - 6*x^2 + 11*x - 6");
+var rootsByName = mathRoots("cubic");
+print(rootsByName);
+
+// by raw coefficients, highest-degree first -- and a case with complex
+// roots, where mathRootsImag() gives the matching imaginary parts
+var rs = mathRoots(1, 0, -4);
+print(rs[0]);
+print(rs[1]);
+mathDefine("q(x) = x^2 + 1"); // roots at +-i
+print(mathToString("q"));
+var reQ = mathRoots("q");
+var imQ = mathRootsImag("q");
+print(reQ[0]); 
+print(reQ[1]); 
+print(imQ[0]);
+print(imQ[1]);
+
+
+// ==========================================================
+// 11. Linear algebra
+// ==========================================================
+
+print("=== 11. Linear algebra ===");
+var[][] A = {{1,2},{3,4}};
+print(matDeterminant(A));
+print(matRank(A));
+var Ainv = matInverse(A);
+print(Ainv);
+
+var[][] B = {{5},{6}};
+var xSol = matSolve(A, B);
+print(xSol);
+
+var evals = matEigenvalues(A);
+print(evals[0]);
+print(evals[1]);
+var evalsi = matEigenvaluesImag(A);
+print(evalsi[0]);
+
+print(matTranspose(A));
+print(matMultiply(A, A));
+
+
+// ==========================================================
+// 12. Error handling
+// ==========================================================
+
+print("=== 12. Error handling ===");
+
+// symbolic integral that has no closed form -> caught, use numeric instead
+mathDefine("h(x) = sin(x) * cos(x)");
+try {
+    print(mathIntegral("h"));
+} catch (var e) {
+    print("caught: " + e);
+}
+
+// looking up an undefined function
+try {
+    print(mathEval("doesNotExist", 1));
+} catch (var e) {
+    print("caught: " + e);
+}
+
+// inverting a singular matrix
+var[][] S = {{1,2},{2,4}};
+try {
+    print(matInverse(S));
+} catch (var e) {
+    print("caught: " + e);
+}
+
+// a BigInt too large to factor by trial division
+try {
+    var ds = divisors((BigInt)357686312646216567629137);
+} catch (var e) {
+    print("caught: " + e);
+}
+
+print("done");

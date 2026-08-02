@@ -2,82 +2,197 @@
 
 # CnR — Compile N Run
 
-### A mathematical, concurrent, and high-performance programming language, powered by a native C++ runtime.
+### A mathematical, concurrent, high-performance scripting language, powered by a native C++ runtime.
 
 <br>
 
-`Compile the file, and run, just as simples as that!`
+![status](https://img.shields.io/badge/status-active--development-orange)
+![language](https://img.shields.io/badge/runtime-C%2B%2B17-blue)
+![license](https://img.shields.io/badge/license-unlicensed-lightgrey)
+
+<br>
+
+`Compile the file, and run — just as simple as that.`
+
 </div>
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Quick Start](#quick-start)
+- [Getting Started (Build)](#getting-started-build)
+- [Language Basics](#language-basics)
+  - [Variables](#variables)
+  - [Operators](#operators)
+  - [Control Flow](#control-flow)
+  - [Functions & Structs](#functions--structs)
+  - [Arrays](#arrays)
+  - [Error Handling](#error-handling--try--catch--throw)
+- [MathLib — Symbolic & Numeric Math](#mathlib--symbolic--numeric-math)
+- [Native Threading & Parallelism](#native-threading--parallelism)
+- [DAG Execution System — `Nodes`](#dag-execution-system--nodes)
+- [Native Database System](#native-database-system)
+- [Networking / Web](#networking--web)
+- [Editor Support](#editor-support)
+- [Runtime in C++](#runtime-in-c)
+- [Future Features](#future-features)
+- [Vision](#vision)
 
 ---
 
 ## Overview
 
-**CnR (Compile N Run)** is a custom programming language built to pair a small, readable syntax with the raw performance of a native C++ runtime underneath it.
-
-The core idea is simple:
+**CnR (Compile N Run)** pairs a small, readable syntax with a native C++ runtime underneath it.
 
 - You write code in **CnR** — clean, minimal, expressive.
-- The **C++ runtime** does the heavy lifting — parsing, executing, and optimizing under the hood.
-- CnR handles the plumbing in between, so you get a simple programming experience without giving up performance.
+- The **C++ runtime** does the heavy lifting — lexing, parsing, and interpreting directly, no separate build step to manage.
+- One binary, one command: `./cnr program.cnr`.
 
 CnR is being designed with a clear focus on:
 
-- Scientific & mathematical computing
-- Artificial Intelligence
-- Parallel & concurrent programming
-- Networking
-- Databases
-- Workflow / DAG execution
+| Focus area | Status |
+|---|---|
+| Scientific & mathematical computing | ✅ Implemented — full symbolic/numeric MathLib bridge |
+| Parallel & concurrent programming | ✅ Implemented — threads, `Parallel{}`, DAG `Nodes{}` workflows |
+| Networking (HTTP client + server) | ✅ Implemented — built directly into the language |
+| Databases (native, optionally encrypted) | ✅ Implemented — `.cnrdb` format with AES-256-CBC at rest |
+| Bytecode / JIT execution | 🔜 Planned — see [Future Features](#future-features) |
 
-> Want to see it in action? This repo includes real, runnable `.cnr` example files for every feature below — check the file mentioned in each section to see working code.
+> Every feature below links to a real, runnable example file in this repo — open it to see working code, not just a syntax sketch.
 
 ---
 
-## Current Features
+## Quick Start
+
+No installation beyond building the single binary (see [Getting Started](#getting-started-build)). Save this as `fib.cnr`:
+
+```cnr
+function fib(var n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+for (var i = 0; i < 10; i++) {
+    print(fib(i));
+}
+```
+
+Then run it:
+
+```bash
+./cnr fib.cnr
+```
+
+```
+0
+1
+1
+2
+3
+5
+8
+13
+21
+34
+```
+
+For a broader tour of syntax — every operator, every loop form, `switch`, `break`/`continue`, and more — see [`examples/Basics/basics.cnr`](examples/Basics/basics.cnr), or jump straight to [Language Basics](#language-basics) below.
+
+---
+
+## Getting Started (Build)
+
+```bash
+Still making the cmake...
+```
+
+Everything — the interpreter and the entire MathLib bridge — is unity-built from `CnR.cpp` (which pulls in `math_bridge.inc` and the flattened `mathlib_flat/` sources). No extra include paths, no separate library to link. File extension doesn't matter to the interpreter; `.cnr` and `.CnR` are both used throughout this repo's examples.
+
+---
+
+## Language Basics
+
+> A single file exercising everything in this section end-to-end lives at [`examples/Basics/basics.cnr`](examples/Basics/basics.cnr) — variables, every operator, and every control-flow construct, each with the expected printed output alongside it.
 
 ### Variables
 
-CnR currently uses **double-precision numbers as its native numeric type**, along with strings, booleans, arrays, structs, and objects built on top of them. The language is designed around numerical computing, calculation, and data processing first.
+CnR's native numeric type is a **double-precision number** (`var`). Layered on top of that:
 
-> See `Hello.cnr` for a minimal first program.
-> See `numeric_types.cnr` for all numerical variables.
-> See `BigFloat.cnr` for BigFloat usage.
+- `string`, `char` (via cast — see below), booleans (`true`/`false`)
+- Dynamic arrays (`var[]`), matrices (`var[][]`), and tensors (`var[][][]`, and so on for higher rank — same `var` keyword, just more bracket pairs)
+- `BigInt` and `BigFloat` — arbitrary-precision integers and decimals (up to 1000 significant digits), reached via casts: `(BigInt)x`, `(BigFloat)x`, or `(BigFloat(N))x` for a specific precision
+- Structs and struct-backed objects
+
+There is currently no `'x'` char literal — chars are produced by casting a numeric code: `var c = (char)65;`.
+
+```cnr
+var n = 42;
+var s = "hello";
+var c = (char)65;
+var flag = true;
+var arr[] = {1, 2, 3};
+```
+
+> See `examples/Basics/basics.cnr` for all of the above in one place, `examples/Variables/numeric_types.cnr` for the numeric type set, `examples/Variables/BigFloat.cnr` for arbitrary-precision arithmetic, and `examples/Variables/Matrix_Tensor.cnr` for how `var[][]`/`var[][][]` declarations work.
+
+### Operators
+
+| Category | Operators |
+|---|---|
+| Arithmetic | `+` `-` `*` `/` `%`, unary `-` |
+| Assignment | `=` |
+| Compound assignment | `+=` `-=` `*=` `/=` |
+| Increment / decrement | `++` `--` |
+| Comparison | `==` `!=` `<` `<=` `>` `>=` |
+| Logical | `&&` `\|\|` `!` |
+
+`+` also concatenates strings (`"foo" + "bar"` → `"foobar"`), and `==`/`!=` compare strings by value. Compound-assignment and increment/decrement work on plain variables and on array elements (`arr[i] += 1;`, `arr[i]++;`).
+
+```cnr
+var x = 10;
+x += 5;   // 15
+x++;      // 16
+print(x == 16 && x != 0);   // true
+```
+
+> See `examples/Basics/basics.cnr` for every operator exercised with its expected output.
 
 ### Control Flow
 
-CnR supports the structures you'd expect from any general-purpose language:
-
 - `if` / `else`
 - `while` loops
-- `for` loops
-- Standard comparison & logical operators (`==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`)
+- `for` loops (C-style), with increments written any of three equivalent ways: `i = i + 1`, `i += 1`, or `i++`
+- `switch` / `case` / `default` — the first matching case runs (no fallthrough); `break;` inside a case exits the switch early without affecting an enclosing loop
+- `break` and `continue`, valid inside `while`, `for`, and `switch` — using either outside of one is a parse-time error
+
+```cnr
+for (var i = 0; i < 10; i++) {
+    if (i == 3) { continue; }
+    if (i == 7) { break; }
+    switch (i % 2) {
+        case 0 { print("even"); }
+        default { print("odd"); }
+    }
+}
+```
+
+> See `examples/Basics/basics.cnr` for `if`/`else`, `while`, all three `for` increment styles, `break`, `continue`, nested loops, and `switch` (including the case/loop-break distinction) each demonstrated with the exact printed output.
 
 ### Functions & Structs
 
-CnR currently supports:
-
 - Function declaration & invocation (`function`)
 - Return values (`return`)
-- Struct declarations with constructors and fields (`Struct`)
+- `Struct` declarations with a constructor (a method sharing the struct's name) and fields
 
-> See `linearRegression.cnr` for a full example combining structs, functions, arrays, and loops — a linear regression model trained with gradient descent, entirely in CnR.
+> See `examples/Examples/linearRegression.cnr` for structs, functions, arrays, and loops combined into a gradient-descent linear regression model, and `examples/Examples/Xor_nn.cnr` for matrix-based math in a small neural net.
 
-> See `Xor_nn.cnr` for a full example of how matrices works and basic math.
-
-**Planned improvements:** more advanced function systems, better function composition, and additional language abstractions.
-
-### Native Database System
-
-CnR currently supports:
-
-- A custom `.cnrdb` database format
-- Database syntax built directly into the language
-- Tables, records, and persistence
+**Planned improvements:** more advanced function systems, better composition, and additional language abstractions.
 
 ### Arrays
 
-CnR currently supports dynamic, numeric arrays with built-in methods:
+Dynamic, numeric arrays with built-in methods:
 
 - `push`, `pop`
 - `sort`, `reverse`
@@ -85,101 +200,130 @@ CnR currently supports dynamic, numeric arrays with built-in methods:
 - `accumulate`
 - `len(...)`
 
-> See `Array.cnr` for array declaration and method usage.
-
-**Planned improvements:** numerical transformations and more optimized array processing.
+> See `examples/Variables/Array.cnr` for declaration and method usage.
 
 ### Error Handling — `try` / `catch` / `Throw`
-
-CnR supports structured exception handling:
 
 - `try { ... } catch(var e) { ... }` — catches thrown errors **and** ordinary runtime errors (division by zero, out-of-bounds access, etc.), binding the message to `e` as a string.
 - `Throw("message");` — raises your own catchable error.
 
-> See `TryCatch.cnr` for division-by-zero, out-of-bounds, and custom `Throw()` examples.
+> See `examples/ErrorHandling/TryCatch.cnr` for division-by-zero, out-of-bounds, and custom `Throw()` examples.
+
+---
+
+## MathLib — Symbolic & Numeric Math
+
+CnR ships with a full symbolic/numeric math bridge (`math_bridge.inc` on top of a standalone C++ `mathlib`), exposed as built-in functions. This is implemented and working today, not a future goal.
+
+**Defining and inspecting functions:**
+
+```cnr
+mathDefine("f(x) = sqrt(x - 2)");
+print(mathToString("f"));   // f(x) = sqrt(x - 2)
+print(mathEval("f", 6));    // 2
+print(mathDomain("f"));     // [2, +inf)
+```
+
+**Calculus** — `mathDerivative`, `mathIntegral` (symbolic, throws a clear error if no closed form exists), `mathDefiniteIntegral` (numeric; switches to exact BigDecimal integration automatically when given `BigFloat` bounds and a polynomial/rational integrand), `mathTaylorSeries`, `mathLimit`, `mathLimitAtInfinity`.
+
+**Roots, sums, products, bijectivity:** `mathRoots`/`mathRootsImag` (either raw coefficients, `mathRoots(1, -6, 11, -6)`, or a `mathDefine`'d function by name, `mathRoots("cubic")`), `mathSum`, `mathProduct`, `mathIsBijective`, `mathInverse`, `mathNumericInverseAt`.
+
+**Number theory:** `isPrime`, `divisors` — both exact on arbitrary-precision `BigInt` input, not just machine integers.
+
+**Linear algebra**, operating directly on `var[][]` matrix values: `matDeterminant`, `matRank`, `matInverse`, `matSolve`, `matEigenvalues`/`matEigenvaluesImag`, `matTranspose`, `matMultiply`.
+
+**Constants:** `pi`, `euler` (`e`), `phi`, `psi` (golden ratio and its conjugate) are preloaded as `BigFloat` globals at 22-digit default precision.
+
+> See `examples/Mathlib/mathlibExamples.cnr` for a full tour of every one of these builtins, including BigFloat-precision edge cases and error handling.
 
 ---
 
 ## Native Threading & Parallelism
 
-CnR currently supports:
+- Spawn threads directly with `thread(...)`, collect results with `join()` / `joinAll()`
+- Run multiple blocks concurrently with `Parallel { } { } ...`
 
-- Spawning threads directly from CnR with `thread(...)`, and collecting results with `join()` / `joinAll()`
-- Running multiple blocks concurrently with `Parallel { } { } ...`
+> See `examples/Threadding/Thread.cnr` for `thread()`/`join()`, and `examples/Threadding/Parallel.cnr` for `Parallel{}` blocks.
 
-> See `Thread.cnr` for `thread()`/`join()` examples, and `Parallel.cnr` for `Parallel{}` blocks.
-
-**Planned capabilities:** locks, mutable/shared state primitives, thread lifecycle management, and runtime-controlled scheduling — abstracting complex C++ concurrency while keeping high-performance parallel code accessible.
+**Planned:** locks, mutable/shared state primitives, full thread lifecycle management, runtime-controlled scheduling.
 
 ---
 
 ## DAG Execution System — `Nodes`
 
-CnR includes a **Directed Acyclic Graph workflow system** for orchestrating dependent tasks, expressed directly in the language via the `Nodes { }` statement.
+A Directed Acyclic Graph workflow system expressed directly in the language via `Nodes { }`.
 
-**Currently supported:**
-
-- Declaring named nodes with dependencies: `Step2(Step1) { ... }`
-- Automatic execution ordering based on the dependency graph
+- Declare named nodes with dependencies: `Step2(Step1) { ... }`
+- Automatic execution ordering from the dependency graph
 - Nodes with satisfied dependencies at the same "depth" run **in parallel**, as threads
-- Retry policies per node: `OnFail(Retry = N)`
+- Retry policies per node: `Step1() -> OnFail(Retry = N) { ... }`
 - Explicit node failure via `Fail();`
-- Automatic skipping of nodes whose dependencies failed, without aborting the rest of the workflow
+- Dependents of a failed node are automatically skipped, without aborting the rest of the workflow
 - Cycle detection with clear error reporting
 
-**Example execution concept:**
+> See `examples/Threadding/Nodes.cnr` for retries, dependency chains, and failure/skip propagation.
 
+**Planned:** richer workflow tracking/observability, passing results between dependent nodes.
+
+---
+
+## Native Database System
+
+A custom `.cnrdb` table format, with database syntax built directly into the language:
+
+```cnr
+Data LoginDB("logindb") {
+    Struct Account {
+        var id;
+        var username[];
+        var password[];
+        ...
+        Account(var i, var u, var p) { id = i; username = u; password = p; }
+    }
+}
 ```
-Node A runs
-Node A completes successfully
-Node B becomes available
-Node B finishes
-Nodes C and D execute in parallel
-Node E runs after its dependencies complete
-```
 
-This enables:
+- Tables, records, and disk persistence, with methods like `.insert`, `.find`, `.findWhere`, `.findById`, `.updateWhere`, `.updateById`, `.delete`, `.deleteWhere`, `.deleteById`, `.orderBy`, `.count`, `.save`, `.load`
+- **Encryption at rest**: `.encode(key)` enables real AES-256-CBC encryption (SHA-256-derived key) for the backing `.cnrdb` file — this is implemented today, via a minimal self-contained AES/SHA implementation with no external crypto dependency.
 
-- Parallel workflows
-- Scientific pipelines
-- AI processing chains
-- Distributed execution possibilities
-
-> See `Nodes.cnr` for retries, dependency chains, and failure/skip propagation.
+> See `examples/Database/db_write.cnr` and `examples/Database/db_read.cnr` for a full login-system example exercising every table method.
 
 ---
 
 ## Networking / Web
 
-CnR currently supports:
-
 - Raw socket support
-- An HTTP client: `Http.GET/POST/PUT/PATCH/DELETE(url) { header { ... } body { ... } }`
-- A full HTTP server: `Server() { host = ...; port = ...; }`, route declarations (`server.GET("/path") { ... }`), and `server.start()`
-- Rich `request` / `response` objects inside route handlers — `request.params`, `.query`, `.header`, `.cookie`, `.body`, `.json`, and `response.status`, `.header()`, `.cookie()`, `.redirect()`
+- HTTP client: `Http.GET/POST/PUT/PATCH/DELETE(url) { header { ... } body { ... } }`
+- HTTP server: `Server() { host = ...; port = ...; }`, route declarations (`server.GET("/path") { ... }`), and `server.start()`
+- `request` / `response` objects inside route handlers — `request.params`, `.query`, `.header`, `.cookie`, `.body`, `.json`, and `response.status`, `.header()`, `.cookie()`, `.redirect()`
 
-> See `HttpClient.cnr` for making outbound HTTP requests, and `Http.cnr` for running an HTTP server with routes.
+> See `examples/Http/HttpClient.cnr` for outbound requests, and `examples/Http/Http.cnr` for a running HTTP server with routes.
 
-**Planned web ecosystem:** HTML/template integration, native backend development tooling, and an integrated web stack.
+**Planned:** HTML/template integration, native backend tooling, a fully integrated web stack.
+
+---
+
+## Editor Support
+
+A VS Code extension (`cnr-extesion/cnr/`) provides syntax highlighting for `.cnr`/`.CnR` files via a TextMate grammar, kept in sync with the actual lexer/parser (so keywords, casts, operators, and MathLib builtins highlighted match what the interpreter really accepts).
 
 ---
 
 ## Runtime in C++
 
-CnR is powered by a C++ runtime responsible for actually executing the language. The runtime handles:
+CnR is powered by a single-translation-unit C++ runtime handling:
 
-- Internal execution (lexing, parsing, interpreting)
-- Performance-critical operations
-- Native integrations
-- System communication (sockets, threads, I/O)
+- Lexing, parsing, and tree-walking interpretation
+- Performance-critical operations (BigInt/BigFloat arithmetic, matrix/eigenvalue routines, AES/SHA)
+- Native integrations (raw sockets, threads, file I/O)
 
-The objective is to keep CnR's syntax simple on the surface while relying on C++ performance underneath.
+The goal is to keep CnR's surface syntax simple while getting C++ performance underneath, without a separate compile-and-link step for the person writing CnR code.
 
 ---
 
 ## Future Features
 
-The sections below are **planned, not yet implemented** — grouped by the same categories as the current features above, so it's easy to see where each area is headed.
+Planned, not yet implemented, grouped by area:
 
 ### Variables & Language Core
 - Bytecode generation
@@ -196,21 +340,6 @@ The sections below are **planned, not yet implemented** — grouped by the same 
 - Native backend development tooling
 - A fully integrated web stack
 
-
-### MathLib Integration
-
-The existing C++ MathLib will be integrated directly into CnR, planned to include:
-
-| Area | Planned Capabilities |
-|---|---|
-| **Algebra** | Algebraic operations, expression manipulation, polynomial operations |
-| **Linear Algebra** | Vectors, matrices, tensors |
-| **Calculus** | Derivatives, integrals, limits |
-| **Statistics** | Statistical functions, numerical analysis |
-| **Optimization** | Optimization algorithms, numerical solvers |
-| **Polynomial Mathematics** | Polynomial manipulation, root calculation, Durand-Kerner method, advanced numerical methods |
-| **Symbolic Mathematics** | Symbolic expressions and transformations, built on the parser's AST |
-
 ### Native Neural Network System
 - Tensor operations & matrix calculations
 - Automatic differentiation
@@ -222,18 +351,21 @@ The existing C++ MathLib will be integrated directly into CnR, planned to includ
 - Richer workflow tracking & observability
 - Passing results between dependent nodes
 
+### MathLib
+- Further symbolic simplification and a richer rule engine for function composition/algebra
+- Exact BigDecimal evaluation for transcendental expressions (currently BigFloat-precision calculus is exact only for polynomial/rational bodies; `sin`/`cos`/`exp`/`sqrt` fall back to ~19-digit `long double` precision)
+
 ---
 
 ## Vision
 
-CnR aims to become a programming language where:
+CnR aims to become a language where:
 
-- Mathematics is native.
-- AI development is integrated.
+- Mathematics is native — and, for polynomial/rational calculus, exact to arbitrary precision.
 - Parallelism is simplified.
 - Networking is built-in.
-- Databases are part of the language.
-- Performance comes from the C++ runtime.
+- Databases are part of the language, with encryption at rest available out of the box.
+- Performance comes from the C++ runtime, with no build step of your own to maintain.
 
 <div align="center">
 

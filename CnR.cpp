@@ -14,6 +14,7 @@
 #include <random>
 #include <cstdio>
 #include <cmath>
+#include <complex>
 
 enum class TokType {
     Number, Ident, String,
@@ -25,8 +26,11 @@ enum class TokType {
     TryKw, CatchKw, ThrowKw,
     DataKw, TableKw,
     IntKw, LongKw, FloatKw, BigIntKw, BigFloatKw,
+    SwitchKw, CaseKw, DefaultKw, BreakKw, ContinueKw,
     Plus, Minus, Star, Slash, Percent,
     Assign,
+    PlusAssign, MinusAssign, StarAssign, SlashAssign,
+    PlusPlus, MinusMinus,
     EqualEqual, BangEqual, Less, LessEqual, Greater, GreaterEqual,
     AndAnd, OrOr, Bang,
     Semicolon, Comma, Dot, Colon,
@@ -71,56 +75,53 @@ struct Lexer {
             break;
         }
     }
+    // ---- Gargalo #7 fix: static keyword table instead of a 28-deep chain
+    // of full string comparisons. Built once (function-local static, thread
+    // -safe init in C++11+), then it's a single O(1) amortized hash lookup
+    // per identifier instead of up to 28 std::string::operator== calls.
+    static const std::unordered_map<std::string, TokType>& keywordTable() {
+        static const std::unordered_map<std::string, TokType> kw = {
+            {"var", TokType::Var}, {"print", TokType::Print}, {"if", TokType::If},
+            {"else", TokType::Else}, {"while", TokType::While}, {"for", TokType::For},
+            {"true", TokType::TrueKw}, {"false", TokType::FalseKw}, {"char", TokType::CharKw},
+            {"len", TokType::LenKw}, {"function", TokType::Function}, {"return", TokType::Return},
+            {"Struct", TokType::StructKw}, {"Parallel", TokType::Parallel}, {"thread", TokType::ThreadKw},
+            {"join", TokType::JoinKw}, {"joinAll", TokType::JoinAllKw}, {"string", TokType::StringKw},
+            {"Http", TokType::HttpKw}, {"header", TokType::HeaderKw}, {"body", TokType::BodyKw},
+            {"Nodes", TokType::NodesKw}, {"OnFail", TokType::OnFailKw}, {"Retry", TokType::RetryKw},
+            {"Fail", TokType::FailKw}, {"try", TokType::TryKw}, {"catch", TokType::CatchKw},
+            {"Throw", TokType::ThrowKw}, {"Data", TokType::DataKw}, {"table", TokType::TableKw},
+            {"Int", TokType::IntKw}, {"long", TokType::LongKw}, {"Float", TokType::FloatKw},
+            {"BigInt", TokType::BigIntKw}, {"BigFloat", TokType::BigFloatKw}, {"bigDouble", TokType::BigFloatKw},
+            {"switch", TokType::SwitchKw}, {"case", TokType::CaseKw}, {"default", TokType::DefaultKw},
+            {"break", TokType::BreakKw}, {"continue", TokType::ContinueKw},
+        };
+        return kw;
+    }
     Token identifier() {
         int startLine = line;
-        std::string s;
-        while (std::isalnum((unsigned char)peek()) || peek() == '_') s += advance();
-        if (s == "var") return {TokType::Var,s,0,startLine};
-        if (s == "print") return {TokType::Print,s,0,startLine};
-        if (s == "if") return {TokType::If,s,0,startLine};
-        if (s == "else") return {TokType::Else,s,0,startLine};
-        if (s == "while") return {TokType::While,s,0,startLine};
-        if (s == "for") return {TokType::For,s,0,startLine};
-        if (s == "true") return {TokType::TrueKw,s,0,startLine};
-        if (s == "false") return {TokType::FalseKw,s,0,startLine};
-        if (s == "char") return {TokType::CharKw,s,0,startLine};
-        if (s == "len") return {TokType::LenKw,s,0,startLine};
-        if (s == "function") return {TokType::Function,s,0,startLine};
-        if (s == "return") return {TokType::Return,s,0,startLine};
-        if (s == "Struct") return {TokType::StructKw,s,0,startLine};
-        if (s == "Parallel") return {TokType::Parallel,s,0,startLine};
-        if (s == "thread") return {TokType::ThreadKw,s,0,startLine};
-        if (s == "join") return {TokType::JoinKw,s,0,startLine};
-        if (s == "joinAll") return {TokType::JoinAllKw,s,0,startLine};
-        if (s == "string") return {TokType::StringKw,s,0,startLine};
-        if (s == "Http") return {TokType::HttpKw,s,0,startLine};
-        if (s == "header") return {TokType::HeaderKw,s,0,startLine};
-        if (s == "body") return {TokType::BodyKw,s,0,startLine};
-        if (s == "Nodes") return {TokType::NodesKw,s,0,startLine};
-        if (s == "OnFail") return {TokType::OnFailKw,s,0,startLine};
-        if (s == "Retry") return {TokType::RetryKw,s,0,startLine};
-        if (s == "Fail") return {TokType::FailKw,s,0,startLine};
-        if (s == "try") return {TokType::TryKw,s,0,startLine};
-        if (s == "catch") return {TokType::CatchKw,s,0,startLine};
-        if (s == "Throw") return {TokType::ThrowKw,s,0,startLine};
-        if (s == "Data") return {TokType::DataKw,s,0,startLine};
-        if (s == "table") return {TokType::TableKw,s,0,startLine};
-        if (s == "Int") return {TokType::IntKw,s,0,startLine};
-        if (s == "long") return {TokType::LongKw,s,0,startLine};
-        if (s == "Float") return {TokType::FloatKw,s,0,startLine};
-        if (s == "BigInt") return {TokType::BigIntKw,s,0,startLine};
-        if (s == "BigFloat" || s == "bigDouble") return {TokType::BigFloatKw,s,0,startLine};
-        return {TokType::Ident,s,0,startLine};
+        // Gargalo #6 fix: scan the span in-place (no per-char string
+        // concatenation / potential reallocation) and materialize the
+        // std::string once at the end via substr.
+        size_t start = pos;
+        while (std::isalnum((unsigned char)peek()) || peek() == '_') advance();
+        std::string s = src.substr(start, pos - start);
+        auto& kw = keywordTable();
+        auto it = kw.find(s);
+        if (it != kw.end()) return {it->second, s, 0, startLine};
+        return {TokType::Ident, std::move(s), 0, startLine};
     }
     Token number() {
         int startLine = line;
-        std::string s;
-        while (std::isdigit((unsigned char)peek())) s += advance();
+        size_t start = pos;
+        while (std::isdigit((unsigned char)peek())) advance();
         if (peek()=='.') {
-            s+=advance();
-            while (std::isdigit((unsigned char)peek())) s+=advance();
+            advance();
+            while (std::isdigit((unsigned char)peek())) advance();
         }
-        return {TokType::Number,s,std::stod(s),startLine};
+        std::string s = src.substr(start, pos - start);
+        double val = std::stod(s);
+        return {TokType::Number, std::move(s), val, startLine};
     }
     Token stringLiteral() {
         int startLine = line;
@@ -158,9 +159,20 @@ struct Lexer {
             if (c=='"') { out.push_back(stringLiteral()); continue; }
             advance();
             switch(c) {
-            case '+': out.push_back({TokType::Plus,"+",0,l}); break;
-            case '-': out.push_back({TokType::Minus,"-",0,l}); break;
-            case '*': out.push_back({TokType::Star,"*",0,l}); break;
+            case '+':
+                if(match('=')) out.push_back({TokType::PlusAssign,"+=",0,l});
+                else if(match('+')) out.push_back({TokType::PlusPlus,"++",0,l});
+                else out.push_back({TokType::Plus,"+",0,l});
+                break;
+            case '-':
+                if(match('=')) out.push_back({TokType::MinusAssign,"-=",0,l});
+                else if(match('-')) out.push_back({TokType::MinusMinus,"--",0,l});
+                else out.push_back({TokType::Minus,"-",0,l});
+                break;
+            case '*':
+                if(match('=')) out.push_back({TokType::StarAssign,"*=",0,l});
+                else out.push_back({TokType::Star,"*",0,l});
+                break;
             case '%': out.push_back({TokType::Percent,"%",0,l}); break;
             case ';': out.push_back({TokType::Semicolon,";",0,l}); break;
             case ',': out.push_back({TokType::Comma,",",0,l}); break;
@@ -195,7 +207,8 @@ struct Lexer {
                 if(match('|')) { out.push_back({TokType::OrOr,"||",0,l}); break; }
                 throw std::runtime_error("Expected second '|'");
             case '/':
-                out.push_back({TokType::Slash,"/",0,l});
+                if(match('=')) out.push_back({TokType::SlashAssign,"/=",0,l});
+                else out.push_back({TokType::Slash,"/",0,l});
                 break;
             default:
                 throw std::runtime_error("Unexpected character '"+std::string(1,c)+"'");
@@ -222,7 +235,8 @@ enum class ExprKind {
 };
 enum class StmtKind {
     VarDecl, Assign, ArrayAssign, MemberAssign, Print, Block, If, While, For,
-    Return, ExprS, Parallel, Nodes, TryCatch, RouteDecl, ServerStart
+    Return, ExprS, Parallel, Nodes, TryCatch, RouteDecl, ServerStart,
+    Break, Continue, Switch
 };
 
 struct Expr { ExprKind kind; explicit Expr(ExprKind k):kind(k){} virtual ~Expr() = default; };
@@ -305,6 +319,24 @@ struct WhileStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> body; Wh
 struct ForStmt : Stmt { StmtPtr init; ExprPtr condition; StmtPtr increment; std::shared_ptr<BlockStmt> body; ForStmt():Stmt(StmtKind::For){} };
 struct ReturnStmt : Stmt { ExprPtr value; ReturnStmt():Stmt(StmtKind::Return){} };
 struct ExprStmt : Stmt { ExprPtr expr; ExprStmt():Stmt(StmtKind::ExprS){} };
+struct BreakStmt : Stmt { BreakStmt():Stmt(StmtKind::Break){} };
+struct ContinueStmt : Stmt { ContinueStmt():Stmt(StmtKind::Continue){} };
+// switch(expr) { case c1 { ... } case c2 { ... } default { ... } }
+// Each case's value is evaluated against the switch subject with ==
+// semantics (same equality as the language's `==` operator); the first
+// matching case runs, falling through is NOT supported (each case body is
+// its own isolated block, matching this language's existing block-scoping
+// elsewhere) -- so no explicit `break;` is required to end a case, though
+// `break;` inside a case body is still allowed and simply exits the switch
+// (useful for an early exit partway through a case). `default`, if present,
+// runs when no case matches; it may appear anywhere among the cases.
+struct SwitchCase { ExprPtr value; std::shared_ptr<BlockStmt> body; };
+struct SwitchStmt : Stmt {
+    ExprPtr subject;
+    std::vector<SwitchCase> cases;
+    std::shared_ptr<BlockStmt> defaultBody; // null if no default clause
+    SwitchStmt():Stmt(StmtKind::Switch){}
+};
 struct ParallelStmt : Stmt { std::vector<std::shared_ptr<BlockStmt>> blocks; ParallelStmt():Stmt(StmtKind::Parallel){} };
 
 // --- DAG / Nodes workflow ---
@@ -1247,11 +1279,67 @@ struct Parser {
                 if(consumeSemicolon) expect(TokType::Semicolon,";");
                 return stmt;
             }
+            {
+                TokType compoundOp = TokType::End;
+                if(check(TokType::PlusAssign)) compoundOp = TokType::Plus;
+                else if(check(TokType::MinusAssign)) compoundOp = TokType::Minus;
+                else if(check(TokType::StarAssign)) compoundOp = TokType::Star;
+                else if(check(TokType::SlashAssign)) compoundOp = TokType::Slash;
+                if(compoundOp != TokType::End) {
+                    advance();
+                    auto stmt = std::make_shared<ArrayAssignStmt>();
+                    stmt->arrayName = id.text;
+                    stmt->index = idx;
+                    auto rhs = parseExpression();
+                    stmt->value = std::make_shared<BinaryExpr>(compoundOp, std::make_shared<ArrayAccessExpr>(id.text, idx), rhs);
+                    if(consumeSemicolon) expect(TokType::Semicolon,";");
+                    return stmt;
+                }
+            }
+            if(check(TokType::PlusPlus) || check(TokType::MinusMinus)) {
+                TokType op = check(TokType::PlusPlus) ? TokType::Plus : TokType::Minus;
+                advance();
+                auto stmt = std::make_shared<ArrayAssignStmt>();
+                stmt->arrayName = id.text;
+                stmt->index = idx;
+                stmt->value = std::make_shared<BinaryExpr>(op, std::make_shared<ArrayAccessExpr>(id.text, idx), std::make_shared<NumberExpr>(1.0));
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                return stmt;
+            }
             auto stmt= std::make_shared<ArrayAssignStmt>();
             stmt->arrayName=id.text;
             stmt->index=idx;
             expect(TokType::Assign,"=");
             stmt->value=parseExpression();
+            if(consumeSemicolon) expect(TokType::Semicolon,";");
+            return stmt;
+        }
+        // i += expr; / i -= expr; / i *= expr; / i /= expr; -- desugars to
+        // i = i <op> expr; at parse time, so the executor needs no new cases
+        // (it goes through the ordinary Assign path unchanged).
+        {
+            TokType compoundOp = TokType::End;
+            if(check(TokType::PlusAssign)) compoundOp = TokType::Plus;
+            else if(check(TokType::MinusAssign)) compoundOp = TokType::Minus;
+            else if(check(TokType::StarAssign)) compoundOp = TokType::Star;
+            else if(check(TokType::SlashAssign)) compoundOp = TokType::Slash;
+            if(compoundOp != TokType::End) {
+                advance();
+                auto stmt = std::make_shared<AssignStmt>();
+                stmt->name = id.text;
+                auto rhs = parseExpression();
+                stmt->value = std::make_shared<BinaryExpr>(compoundOp, std::make_shared<VarExpr>(id.text), rhs);
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                return stmt;
+            }
+        }
+        // i++; / i--; -- desugars to i = i + 1; / i = i - 1;
+        if(check(TokType::PlusPlus) || check(TokType::MinusMinus)) {
+            TokType op = check(TokType::PlusPlus) ? TokType::Plus : TokType::Minus;
+            advance();
+            auto stmt = std::make_shared<AssignStmt>();
+            stmt->name = id.text;
+            stmt->value = std::make_shared<BinaryExpr>(op, std::make_shared<VarExpr>(id.text), std::make_shared<NumberExpr>(1.0));
             if(consumeSemicolon) expect(TokType::Semicolon,";");
             return stmt;
         }
@@ -1280,7 +1368,9 @@ struct Parser {
         auto stmt = std::make_shared<WhileStmt>();
         stmt->condition = parseExpression();
         expect(TokType::RParen,")");
+        loopSwitchDepth++;
         stmt->body = parseBlock();
+        loopSwitchDepth--;
         return stmt;
     }
 
@@ -1294,7 +1384,9 @@ struct Parser {
         expect(TokType::Semicolon,";");
         stmt->increment = parseAssignmentStatement(false);
         expect(TokType::RParen,")");
+        loopSwitchDepth++;
         stmt->body = parseBlock();
+        loopSwitchDepth--;
         return stmt;
     }
 
@@ -1369,6 +1461,60 @@ struct Parser {
         return stmt;
     }
 
+    // Tracks how many enclosing While/For/Switch bodies we're currently
+    // parsing inside of, so `break;`/`continue;` outside of any loop or
+    // switch is a parse-time error instead of a confusing runtime no-op.
+    int loopSwitchDepth = 0;
+
+    StmtPtr parseBreak() {
+        auto tok = expect(TokType::BreakKw,"break");
+        if(loopSwitchDepth == 0)
+            throw std::runtime_error("'break' used outside of a loop or switch, line " + std::to_string(tok.line));
+        expect(TokType::Semicolon,";");
+        return std::make_shared<BreakStmt>();
+    }
+
+    StmtPtr parseContinue() {
+        auto tok = expect(TokType::ContinueKw,"continue");
+        if(loopSwitchDepth == 0)
+            throw std::runtime_error("'continue' used outside of a loop, line " + std::to_string(tok.line));
+        expect(TokType::Semicolon,";");
+        return std::make_shared<ContinueStmt>();
+    }
+
+    StmtPtr parseSwitch() {
+        expect(TokType::SwitchKw,"switch");
+        expect(TokType::LParen,"(");
+        auto stmt = std::make_shared<SwitchStmt>();
+        stmt->subject = parseExpression();
+        expect(TokType::RParen,")");
+        expect(TokType::LBrace,"{");
+        loopSwitchDepth++;
+        bool sawDefault = false;
+        while(!check(TokType::RBrace)) {
+            if(check(TokType::End))
+                throw std::runtime_error("Unexpected end of file inside 'switch'");
+            if(match(TokType::CaseKw)) {
+                SwitchCase c;
+                c.value = parseExpression();
+                c.body = parseBlock();
+                stmt->cases.push_back(std::move(c));
+                continue;
+            }
+            if(match(TokType::DefaultKw)) {
+                if(sawDefault)
+                    throw std::runtime_error("'switch' has more than one 'default' clause, line " + std::to_string(peek().line));
+                sawDefault = true;
+                stmt->defaultBody = parseBlock();
+                continue;
+            }
+            throw std::runtime_error("Expected 'case' or 'default' inside 'switch', line " + std::to_string(peek().line));
+        }
+        expect(TokType::RBrace,"}");
+        loopSwitchDepth--;
+        return stmt;
+    }
+
     StmtPtr parseTryCatch() {
         expect(TokType::TryKw,"try");
         auto stmt = std::make_shared<TryCatchStmt>();
@@ -1392,6 +1538,9 @@ struct Parser {
         if(check(TokType::Parallel)) return parseParallel();
         if(check(TokType::NodesKw)) return parseNodes();
         if(check(TokType::TryKw)) return parseTryCatch();
+        if(check(TokType::SwitchKw)) return parseSwitch();
+        if(check(TokType::BreakKw)) return parseBreak();
+        if(check(TokType::ContinueKw)) return parseContinue();
         if(check(TokType::FailKw)) {
             auto stmt = std::make_shared<ExprStmt>();
             stmt->expr = parseExpression();
@@ -2111,7 +2260,20 @@ std::string valueToDisplayString(const Value& v) {
     if(v.isStruct) return "[struct " + v.cex().structType + "]";
     if(v.cex().isDatabase) return "[database]";
     if(v.isArray && !v.dims.empty()) return tensorToDisplayString(v);
-    if(v.isArray) return "[array]";
+    if(v.isArray) {
+        // Plain 1-D array: print its elements, e.g. [1,2,3], instead of the
+        // old opaque "[array]" placeholder -- mirrors how a Matrix/Tensor
+        // (dims non-empty) already prints its actual contents above.
+        std::ostringstream oss;
+        oss << '[';
+        for(size_t i = 0; i < v.array.size(); ++i) {
+            if(i > 0) oss << ',';
+            double d = v.array[i];
+            if(d == (long long)d) oss << (long long)d; else oss << d;
+        }
+        oss << ']';
+        return oss.str();
+    }
     if(v.numKind == NumKind::Big) return v.cex().big ? v.cex().big->toString() : "0";
     if(v.numKind == NumKind::I32 || v.numKind == NumKind::I64) return std::to_string(v.i64);
     if(v.numKind == NumKind::BigF) {
@@ -2477,7 +2639,8 @@ bool isMathBuiltinName(const std::string& name) {
     static const std::unordered_map<std::string,int> names = {
         {"sqrt",0},{"sqroot",0},{"pow",0},{"abs",0},{"floor",0},{"ceil",0},
         {"round",0},{"log",0},{"ln",0},{"log10",0},{"exp",0},
-        {"sin",0},{"cos",0},{"tan",0},{"min",0},{"max",0},
+        {"sin",0},{"cos",0},{"tan",0},{"arcsin",0},{"arccos",0},{"arctan",0},
+        {"isPrime",0},{"min",0},{"max",0},
         {"random",0},{"randomSeed",0}
     };
     return names.count(name) > 0;
@@ -2597,6 +2760,57 @@ Value callMathBuiltin(const std::string& name, std::vector<Value>& args) {
         long double r = (name=="sin") ? std::sin(x) : (name=="cos") ? std::cos(x) : std::tan(x);
         return useBig ? makeBigFloatValue(r, bigPrecision) : makePlainNumber((double)r);
     }
+    if(name == "arcsin" || name == "arccos") {
+        need(1);
+        long double x = valueToLongDouble(args[0]);
+        if(x < -1.0L || x > 1.0L)
+            throw std::runtime_error("'" + name + "()' argument must be between -1 and 1");
+        long double r = (name=="arcsin") ? std::asin(x) : std::acos(x);
+        return useBig ? makeBigFloatValue(r, bigPrecision) : makePlainNumber((double)r);
+    }
+    if(name == "arctan") {
+        need(1);
+        long double x = valueToLongDouble(args[0]);
+        long double r = std::atan(x);
+        return useBig ? makeBigFloatValue(r, bigPrecision) : makePlainNumber((double)r);
+    }
+    if(name == "isPrime") {
+        // Exact primality test in BigInt arithmetic (not int64_t, so it
+        // doesn't silently overflow/give a wrong answer on large BigInt
+        // input the way an int64-based test would). Trial division up to
+        // sqrt(n), same practical limit and same honest error as
+        // divisors(): fast for everyday numbers, throws a clear error
+        // rather than hanging on something like a 24-digit input instead of
+        // silently taking forever or returning a wrong answer.
+        need(1);
+        BigInt n = valueToBigInt(args[0]);
+        n.negative = false;
+        if(n.isZero() || n == BigInt::fromInt64(1)) return Value::makeBool2(false);
+        if(n == BigInt::fromInt64(2) || n == BigInt::fromInt64(3)) return Value::makeBool2(true);
+        BigInt two = BigInt::fromInt64(2);
+        {
+            BigInt rem;
+            BigInt::divModAbs(n, two, rem);
+            if(rem.isZero()) return Value::makeBool2(false);
+        }
+        static const long long kTrialLimit = 100000000LL; // same 1e8 ceiling as divisors()
+        BigInt limit = BigInt::fromInt64(kTrialLimit);
+        BigInt limitSq = limit * limit;
+        if(BigInt::cmpAbs(n, limitSq) > 0)
+            throw std::runtime_error("isPrime(): " + n.toString() + " is too large to test by trial division "
+                                      "(would need more than " + std::to_string(kTrialLimit) + " trial divisions) -- "
+                                      "this function is exact but not fast enough for numbers this large");
+        BigInt i = BigInt::fromInt64(3);
+        while(true) {
+            BigInt iSq = i * i;
+            if(BigInt::cmpAbs(iSq, n) > 0) break;
+            BigInt rem;
+            BigInt::divModAbs(n, i, rem);
+            if(rem.isZero()) return Value::makeBool2(false);
+            i = i + two;
+        }
+        return Value::makeBool2(true);
+    }
     if(name == "min" || name == "max") {
         need(2);
         int c = numericCompare(args[0], args[1]);
@@ -2629,6 +2843,8 @@ Value callMathBuiltin(const std::string& name, std::vector<Value>& args) {
     throw std::runtime_error("Unknown built-in math function '" + name + "'");
 }
 
+#include "math_bridge.inc"
+
 // Statement-execution result: `execute`/`executeBlock` used to signal a
 // `return` by throwing ReturnSignal (a C++ exception) and catching it at
 // every function-call boundary. Per profiling, throw/catch is dramatically
@@ -2640,7 +2856,15 @@ Value callMathBuiltin(const std::string& name, std::vector<Value>& args) {
 // status after each statement and stops early on Return, exactly mirroring
 // what "the exception propagates past not-yet-executed statements" used to
 // do -- just without ever unwinding the C++ stack.
-enum class ExecResult { Normal, Return };
+// Break/Continue propagate upward through executeBlock/execute exactly like
+// Return does, but are only ever *consumed* by While/For/Switch (which is
+// what stops them from escaping past the innermost enclosing loop/switch).
+// If one somehow reached the top of a function body uncaught (which the
+// parser prevents -- see parseBreak/parseContinue's enclosing-loop check)
+// it would simply behave like Normal there, so this stays a pure superset
+// of the original two-value enum and every existing `== ExecResult::Return`
+// check keeps working unchanged.
+enum class ExecResult { Normal, Return, Break, Continue };
 
 // Thrown by Fail() to abort the current attempt of the enclosing Nodes{}
 // node body. Caught by the per-node retry loop in runNodesWorkflow(); if
@@ -3733,24 +3957,89 @@ struct DatabaseInstance {
     }
 };
 
+// ---- Gargalo #4 fix: variable scope storage ----
+// A single scope (one entry in the Interpreter::scopes stack) almost always
+// holds a small number of variables -- a function's params/locals rarely
+// exceed a handful. std::unordered_map pays for a string hash + bucket
+// lookup + node traversal on every single access, which dominates in tight
+// loops (profiling showed ~15% of total runtime in unordered_map internals).
+// For a small N, a flat, linearly-scanned vector is faster in practice: no
+// hashing, and short variable names compare via inline SSO bytes with great
+// cache locality. Scope keeps that fast path for the common case, but
+// promotes itself to a real hash map if it ever grows past kPromoteThreshold
+// (e.g. a program with many top-level globals), so lookup never degrades to
+// slow O(n) on large scopes -- it just falls back to the old O(1) behavior.
+struct Scope {
+    static constexpr size_t kPromoteThreshold = 12;
+    std::vector<std::pair<std::string, Value>> small;
+    std::unique_ptr<std::unordered_map<std::string, Value>> big; // null until promoted
+
+    Value* find(const std::string& name) {
+        if(big) {
+            auto it = big->find(name);
+            return it == big->end() ? nullptr : &it->second;
+        }
+        for(auto& kv : small) if(kv.first == name) return &kv.second;
+        return nullptr;
+    }
+
+    Value& operator[](const std::string& name) {
+        if(Value* p = find(name)) return *p;
+        if(big) return (*big)[name];
+        if(small.size() >= kPromoteThreshold) {
+            promote();
+            return (*big)[name];
+        }
+        small.emplace_back(name, Value());
+        return small.back().second;
+    }
+
+private:
+    void promote() {
+        big = std::make_unique<std::unordered_map<std::string, Value>>();
+        big->reserve(small.size() * 2);
+        for(auto& kv : small) (*big)[kv.first] = std::move(kv.second);
+        small.clear();
+        small.shrink_to_fit();
+    }
+};
+
 class Interpreter {
 public:
-    Interpreter(std::unordered_map<std::string, FunctionDecl> fns,
-                std::unordered_map<std::string, StructDecl> strs)
-        : functions(std::move(fns)), structs(std::move(strs)) {
+    using FnTable = std::unordered_map<std::string, FunctionDecl>;
+    using StructTable = std::unordered_map<std::string, StructDecl>;
+
+    Interpreter(FnTable fns, StructTable strs)
+        : functions(std::make_shared<const FnTable>(std::move(fns))),
+          structs(std::make_shared<const StructTable>(std::move(strs))) {
         scopes.push_back({});
         seedConstants();
     }
 
-    Interpreter(std::unordered_map<std::string, FunctionDecl> fns,
-                std::unordered_map<std::string, StructDecl> strs,
+    Interpreter(FnTable fns, StructTable strs,
                 std::unordered_map<std::string, DataDecl> das)
+        : functions(std::make_shared<const FnTable>(std::move(fns))) {
+        scopes.push_back({});
+        seedConstants();
+        initDatabases(strs, das); // may merge Data-block-local structs into strs
+        structs = std::make_shared<const StructTable>(std::move(strs));
+    }
+
+    Interpreter(std::shared_ptr<const FnTable> fns, std::shared_ptr<const StructTable> strs)
         : functions(std::move(fns)), structs(std::move(strs)) {
         scopes.push_back({});
         seedConstants();
-        initDatabases(das);
     }
 
+    // Gargalo #10 fix: every Parallel{}/thread() block used to spawn a
+    // worker Interpreter by *deep-copying* the entire functions/structs
+    // declaration tables (once here, then again for the lambda capture,
+    // then again into the by-value constructor above) -- on every single
+    // thread spawn, regardless of how small the actual parallel task was.
+    // functions/structs are never mutated after the program is parsed, so
+    // there's no need for each Interpreter to own an independent copy:
+    // sharing the same read-only table via shared_ptr<const ...> is safe
+    // and turns that copy into a cheap refcount bump.
     Interpreter(const Interpreter& parent, bool /*forThread*/)
         : functions(parent.functions), structs(parent.structs), threadRegistry(parent.threadRegistry) {
         scopes.push_back({});
@@ -3769,9 +4058,9 @@ public:
         scopes.back()["psi"] = makeBigFloatValue(cnrConstantAtPrecision(CNR_PSI_DIGITS, CNR_BIGDEC_DEFAULT_SCALE));
     }
 
-    std::vector<std::unordered_map<std::string, Value>> scopes;
-    std::unordered_map<std::string, FunctionDecl> functions;
-    std::unordered_map<std::string, StructDecl> structs;
+    std::vector<Scope> scopes;
+    std::shared_ptr<const FnTable> functions;
+    std::shared_ptr<const StructTable> structs;
     Value* currentSelf = nullptr;
     ServerResponseState* currentResponseState = nullptr; // set while executing a route body
 
@@ -3790,8 +4079,7 @@ public:
 
 Value& lookupVar(const std::string& name) {
     for(auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-        auto found = it->find(name);
-        if(found != it->end()) return found->second;
+        if(Value* found = it->find(name)) return *found;
     }
     throw std::runtime_error("Undefined variable '" + name + "'");
 }
@@ -4411,8 +4699,8 @@ Value evalMemberAccess(const std::shared_ptr<MemberAccessExpr>& m) {
 }
 
 Value spawnThread(const std::shared_ptr<ThreadExpr>& t) {
-    auto fIt = functions.find(t->fnName);
-    if(fIt == functions.end())
+    auto fIt = functions->find(t->fnName);
+    if(fIt == functions->end())
         throw std::runtime_error("thread(): undefined function '" + t->fnName + "'");
     const FunctionDecl& fn = fIt->second;
     if(t->args.size() != fn.params.size())
@@ -4529,13 +4817,14 @@ Value callCallable(const std::string& name, const std::vector<ExprPtr>& argExprs
     argVals.reserve(argExprs.size());
     for(auto& a : argExprs) argVals.push_back(evalToValue(a));
 
-    auto sIt = structs.find(name);
-    if(sIt != structs.end()) return instantiateStruct(sIt->second, argVals);
+    auto sIt = structs->find(name);
+    if(sIt != structs->end()) return instantiateStruct(sIt->second, argVals);
 
-    auto fIt = functions.find(name);
-    if(fIt != functions.end()) return callFunction(fIt->second, argVals);
+    auto fIt = functions->find(name);
+    if(fIt != functions->end()) return callFunction(fIt->second, argVals);
 
     if(isMathBuiltinName(name)) return callMathBuiltin(name, argVals);
+    if(isMathLibBuiltinName(name)) return callMathLibBuiltin(name, argVals);
 
     throw std::runtime_error("Undefined function or struct '" + name + "'");
 }
@@ -4601,7 +4890,7 @@ Value instantiateStruct(const StructDecl& sd, std::vector<Value>& args) {
 // table, builds one DatabaseInstance per Data decl, tries to load any
 // existing unencrypted .cnrdb file for it from disk, and binds it as a
 // global variable under the Data block's name.
-void initDatabases(const std::unordered_map<std::string, DataDecl>& das) {
+void initDatabases(StructTable& structs, const std::unordered_map<std::string, DataDecl>& das) {
     for(auto& kv : das) {
         const DataDecl& dd = kv.second;
         for(auto& s : dd.structs) {
@@ -4855,8 +5144,8 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
     }
 
     DbRecordTable& table = db.table(dm->tableName);
-    auto sIt = structs.find(table.structType);
-    if(sIt == structs.end())
+    auto sIt = structs->find(table.structType);
+    if(sIt == structs->end())
         throw std::runtime_error("Table '" + dm->tableName + "' has unknown struct type '" + table.structType + "'");
 
     // Looks up the field named table.primaryKeyField on a struct-instance
@@ -4909,6 +5198,15 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
         std::string fieldName = valueToDisplayString(evalToValue(dm->args[0]));
         std::string target = valueToDisplayString(evalToValue(dm->args[1]));
         Value result; result.isArray = true;
+        // Gargalo #8 fix: querying by the primary-key field is a very common
+        // case (e.g. findWhere("id", x)) and already has a ready-made
+        // O(1) hash index (pkIndex) built for findById(). Use it directly
+        // instead of scanning every record and re-stringifying every field.
+        if(!table.primaryKeyField.empty() && fieldName == table.primaryKeyField) {
+            auto it = table.pkIndex.find(target);
+            if(it != table.pkIndex.end()) result.array.push_back((double)it->second);
+            return result;
+        }
         for(size_t i=0;i<table.records.size();++i) {
             auto it = table.records[i].cex().fields->find(fieldName);
             if(it == table.records[i].cex().fields->end()) continue;
@@ -5072,18 +5370,28 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
             else if(dir != "asc")
                 throw std::runtime_error("table.orderBy(): direction must be \"asc\" or \"desc\", got '" + dir + "'");
         }
-        std::vector<size_t> idx(table.records.size());
+        size_t n = table.records.size();
+        std::vector<size_t> idx(n);
         for(size_t i=0;i<idx.size();++i) idx[i]=i;
-        std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
-            auto ia = table.records[a].cex().fields->find(fieldName);
-            auto ib = table.records[b].cex().fields->find(fieldName);
-            if(ia == table.records[a].cex().fields->end() || ib == table.records[b].cex().fields->end())
+        // Gargalo #9 fix: look up the sort field and stringify it once per
+        // record up front (Schwartzian transform), instead of re-doing
+        // fields->find() + valueToDisplayString() inside the comparator on
+        // every one of the O(n log n) comparisons stable_sort performs.
+        std::vector<Value> keyVal(n);
+        std::vector<std::string> keyStr(n);
+        for(size_t i=0;i<n;++i) {
+            auto it = table.records[i].cex().fields->find(fieldName);
+            if(it == table.records[i].cex().fields->end())
                 throw std::runtime_error("table.orderBy(): struct '" + table.structType + "' has no field '" + fieldName + "'");
-            const Value& va = ia->second; const Value& vb = ib->second;
+            keyVal[i] = it->second;
+            keyStr[i] = valueToDisplayString(keyVal[i]);
+        }
+        std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+            const Value& va = keyVal[a]; const Value& vb = keyVal[b];
             bool lt;
             if(!va.isString && !vb.isString) lt = va.number < vb.number;
-            else lt = valueToDisplayString(va) < valueToDisplayString(vb);
-            return descending ? !lt && !(valueToDisplayString(va)==valueToDisplayString(vb)) : lt;
+            else lt = keyStr[a] < keyStr[b];
+            return descending ? !lt && !(keyStr[a]==keyStr[b]) : lt;
         });
         Value result; result.isArray = true;
         for(size_t i : idx) result.array.push_back((double)i);
@@ -5102,7 +5410,8 @@ Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
 // exactly like the old throw/catch did, but via ordinary control flow.
 ExecResult executeBlock(const std::shared_ptr<BlockStmt>& block, Value& returnValue) {
     for(auto& stmt : block->statements) {
-        if(execute(stmt, returnValue) == ExecResult::Return) return ExecResult::Return;
+        ExecResult r = execute(stmt, returnValue);
+        if(r != ExecResult::Normal) return r; // Return/Break/Continue all unwind the block early
     }
     return ExecResult::Normal;
 }
@@ -5622,7 +5931,10 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
     case StmtKind::While: {
         auto s = static_cast<WhileStmt*>(stmt.get());
         while(evalBool(s->condition)) {
-            if(executeBlock(s->body, returnValue) == ExecResult::Return) return ExecResult::Return;
+            ExecResult r = executeBlock(s->body, returnValue);
+            if(r == ExecResult::Return) return ExecResult::Return;
+            if(r == ExecResult::Break) break;
+            // Continue (and Normal) just fall through to re-check the condition.
         }
         return ExecResult::Normal;
     }
@@ -5630,10 +5942,38 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         auto s = static_cast<ForStmt*>(stmt.get());
         execute(s->init, returnValue);
         while(evalBool(s->condition)) {
-            if(executeBlock(s->body, returnValue) == ExecResult::Return) return ExecResult::Return;
+            ExecResult r = executeBlock(s->body, returnValue);
+            if(r == ExecResult::Return) return ExecResult::Return;
+            if(r == ExecResult::Break) break;
+            // Continue (and Normal) still run the increment before the next
+            // condition check, matching C-style `for` semantics.
             execute(s->increment, returnValue);
         }
         return ExecResult::Normal;
+    }
+    case StmtKind::Switch: {
+        auto s = static_cast<SwitchStmt*>(stmt.get());
+        Value subject = evalToValue(s->subject);
+        for(auto& c : s->cases) {
+            Value caseVal = evalToValue(c.value);
+            if(valuesEqual(subject, caseVal)) {
+                ExecResult r = executeBlock(c.body, returnValue);
+                if(r == ExecResult::Break) return ExecResult::Normal;
+                return r; // Return/Continue propagate to the enclosing loop/function
+            }
+        }
+        if(s->defaultBody) {
+            ExecResult r = executeBlock(s->defaultBody, returnValue);
+            if(r == ExecResult::Break) return ExecResult::Normal;
+            return r;
+        }
+        return ExecResult::Normal;
+    }
+    case StmtKind::Break: {
+        return ExecResult::Break;
+    }
+    case StmtKind::Continue: {
+        return ExecResult::Continue;
     }
     case StmtKind::Return: {
         auto s = static_cast<ReturnStmt*>(stmt.get());

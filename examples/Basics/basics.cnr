@@ -1,0 +1,269 @@
+
+// ------------------------------------------------------------
+// 1. Variable declaration
+// ------------------------------------------------------------
+print("== 1. variables ==");
+
+var n = 42;               // number (double under the hood)
+var s = "hello";          // string
+var c = (char)65;         // char (numeric code cast to char; there is no 'x' literal)
+var flag = true;          // boolean
+var arr[] = {1, 2, 3};    // dynamic array
+
+print(n);
+print(s);
+print(c);       // 65  (print() shows a char's underlying numeric code)
+print(flag);
+print(arr[0]);
+
+
+// ------------------------------------------------------------
+// 2. Arithmetic operators: + - * / %
+// ------------------------------------------------------------
+print("== 2. arithmetic operators ==");
+
+print(5 + 3);   // 8
+print(5 - 3);   // 2
+print(5 * 3);   // 15
+print(5 / 3);   // 1.6666...
+print(7 % 3);   // 1  (modulus)
+print(-5);      // -5 (unary minus)
+
+// '+' also concatenates strings:
+print("foo" + "bar");   // foobar
+
+
+// ------------------------------------------------------------
+// 3. Assignment operator
+// ------------------------------------------------------------
+print("== 3. assignment ==");
+
+var a = 10;
+print(a);   // 10
+
+
+// ------------------------------------------------------------
+// 4. Compound-assignment operators: += -= *= /=
+// ------------------------------------------------------------
+print("== 4. compound assignment ==");
+
+var x = 10;
+x += 5;   print(x);   // 15
+x -= 3;   print(x);   // 12
+x *= 2;   print(x);   // 24
+x /= 4;   print(x);   // 6
+
+// Also works on array elements:
+var vals[] = {1, 2, 3};
+vals[0] += 100;
+vals[1] *= 5;
+print(vals[0]);   // 101
+print(vals[1]);   // 10
+
+
+// ------------------------------------------------------------
+// 5. Increment / decrement operators: ++ --
+// ------------------------------------------------------------
+print("== 5. increment / decrement ==");
+
+var i = 0;
+i++;
+i++;
+print(i);   // 2
+
+var j = 5;
+j--;
+print(j);   // 4
+
+// On array elements too:
+var counters[] = {0, 0};
+counters[0]++;
+counters[0]++;
+counters[1]--;
+print(counters[0]);   // 2
+print(counters[1]);   // -1
+
+
+// ------------------------------------------------------------
+// 6. Comparison operators: == != < <= > >=
+// ------------------------------------------------------------
+print("== 6. comparison operators ==");
+
+print(5 == 5);    // true
+print(5 == 6);    // false
+print(5 != 6);    // true
+print(3 < 5);     // true
+print(5 <= 5);    // true
+print(6 > 5);     // true
+print(5 >= 5);    // true
+
+// works on strings too (equality):
+print("abc" == "abc");   // true
+print("abc" == "xyz");   // false
+
+
+// ------------------------------------------------------------
+// 7. Logical operators: && || !
+// ------------------------------------------------------------
+print("== 7. logical operators ==");
+
+print(true && true);    // true
+print(true && false);   // false
+print(false || true);   // true
+print(false || false);  // false
+print(!true);           // false
+print(!false);          // true
+
+print(3 < 5 && 5 < 10);   // true
+print(3 > 5 || 5 < 10);   // true
+
+
+// ------------------------------------------------------------
+// 8. if / else
+// ------------------------------------------------------------
+print("== 8. if / else ==");
+
+var score = 72;
+if (score >= 90) {
+    print("A");
+} else {
+    if (score >= 70) {
+        print("B");
+    } else {
+        print("C");
+    }
+}
+// prints "B"
+
+
+// ------------------------------------------------------------
+// 9. while loop
+// ------------------------------------------------------------
+print("== 9. while ==");
+
+var w = 0;
+while (w < 5) {
+    print(w);
+    w = w + 1;
+}
+// 0 1 2 3 4
+
+
+// ------------------------------------------------------------
+// 10. for loop (C-style)
+// ------------------------------------------------------------
+print("== 10. for ==");
+
+for (var k = 0; k < 5; k = k + 1) {
+    print(k);
+}
+// 0 1 2 3 4
+
+for (var k2 = 0; k2 < 5; k2++) {
+    print(k2);
+}
+// 0 1 2 3 4
+
+for (var k3 = 0; k3 < 10; k3 += 2) {
+    print(k3);
+}
+// 0 2 4 6 8
+
+
+// ------------------------------------------------------------
+// 11. break
+// ------------------------------------------------------------
+print("== 11. break ==");
+
+for (var b1 = 0; b1 < 10; b1++) {
+    if (b1 == 3) { break; }
+    print(b1);
+}
+// 0 1 2
+
+var b2 = 0;
+while (true) {
+    if (b2 == 3) { break; }
+    print(b2);
+    b2++;
+}
+// 0 1 2
+
+
+// ------------------------------------------------------------
+// 12. continue
+// ------------------------------------------------------------
+print("== 12. continue ==");
+
+for (var cn = 0; cn < 5; cn++) {
+    if (cn == 2) { continue; }
+    print(cn);
+}
+// 0 1 3 4
+
+var cn2 = 0;
+while (cn2 < 5) {
+    cn2++;
+    if (cn2 == 3) { continue; }
+    print(cn2);
+}
+// 1 2 4 5
+
+
+// ------------------------------------------------------------
+// 13. nested loops -- break/continue only affect the innermost loop
+// ------------------------------------------------------------
+print("== 13. nested loops ==");
+
+for (var row = 0; row < 3; row++) {
+    for (var col = 0; col < 3; col++) {
+        if (col == 1) { break; }   // only breaks the inner loop
+        print(row * 10 + col);
+    }
+}
+// 0 10 20
+
+
+// ------------------------------------------------------------
+// 14. switch / case / default
+// ------------------------------------------------------------
+print("== 14. switch ==");
+
+var d = 2;
+switch(d) {
+    case 1 { print("Monday"); }
+    case 2 { print("Tuesday"); }
+    case 3 { print("Wednesday"); }
+    default { print("Some other day"); }
+}
+// Tuesday
+
+// switch also works on strings:
+var fruit = "apple";
+switch(fruit) {
+    case "apple" { print("It's an apple"); }
+    case "pear"  { print("It's a pear"); }
+    default      { print("Unknown fruit"); }
+}
+// It's an apple
+
+// break inside a switch case exits the switch early --
+// it does NOT affect an enclosing loop:
+for (var sw = 0; sw < 4; sw++) {
+    switch(sw) {
+        case 2 {
+            print("special case, stopping this case early");
+            break;
+        }
+        default {
+            print(sw);
+        }
+    }
+}
+// 0 1 "special case, stopping this case early" 3
+
+
+// ------------------------------------------------------------
+// End of tour
+// ------------------------------------------------------------
+print("== done ==");
