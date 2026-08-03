@@ -1,3 +1,6 @@
+#ifdef _WIN32
+#define _USE_MATH_DEFINES
+#endif
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -2888,13 +2891,7 @@ struct CnrThrowSignal { std::string message; };
 #include <future>
 #include <atomic>
 #include <cstring>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+#include "sck/sockets.h"
 #include <csignal>
 
 // ============================================================================

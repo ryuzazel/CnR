@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Cross-compile CnR.exe for Windows from Linux using MinGW-w64.
-# Install first:  sudo pacman -S mingw-w64-gcc        (Arch)
-#                 sudo apt install mingw-w64           (Debian/Ubuntu)
-#                 sudo dnf install mingw64-gcc-c++      (Fedora)
+# Cross-compile install.exe (the native PATH-installer for CnR) from Linux
+# using MinGW-w64. Produces a standalone Windows .exe -- no dependencies,
+# no admin rights needed to run it (writes to HKCU, the per-user registry).
+#
+# After this AND build-windows-mingw.sh have both run, copy both CnR.exe
+# and install.exe to the same folder on a Windows machine and double-click
+# install.exe.
 set -euo pipefail
 
 x86_64-w64-mingw32-g++ \
-  -std=c++17 -O3 -pthread -static \
-  CnR.cpp -o CnR.exe
+  -std=c++17 -O2 -static \
+  scripts/install.cpp -o install.exe -lole32 -luuid
 
-echo "Built CnR.exe (statically linked, portable — copy it anywhere on Windows and it'll run)."
+echo "Built install.exe."
+echo "Copy it alongside CnR.exe on Windows and double-click install.exe to install + add to PATH."

@@ -45,12 +45,11 @@ Also produces a portable `.tar.gz` that works on any Linux distro.
 Installs to `%LOCALAPPDATA%\Programs\CnR` and adds it to your user PATH.
 
 **Option B — cross-compile from Linux with MinGW:**
-```bash
-sudo pacman -S mingw-w64-gcc   # or apt/dnf equivalent
-chmod +x scripts/build-windows-mingw.sh
-./scripts/build-windows-mingw.sh
+```js
+Open ./scripts/install.bat
+Installs and add to your user PATH.
 ```
-Produces a statically-linked `CnR.exe` — just copy it to the Windows machine.
+
 
 ## Notes
 - `-march=native` only makes sense when building and running on the *same*
