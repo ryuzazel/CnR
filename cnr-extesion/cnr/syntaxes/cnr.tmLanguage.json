@@ -11,11 +11,13 @@
     {"include":"#matrix-types"},
     {"include":"#types"},
     {"include":"#struct-declarations"},
-    {"include":"#keywords"},
+    {"include":"#control-keywords"},
+    {"include":"#switch-case"},
     {"include":"#nodes-workflow"},
     {"include":"#error-handling"},
     {"include":"#parallel"},
     {"include":"#threads"},
+    {"include":"#mutex"},
     {"include":"#database"},
     {"include":"#request-response"},
     {"include":"#routes"},
@@ -24,6 +26,7 @@
     {"include":"#function-declarations"},
     {"include":"#mathlib-functions"},
     {"include":"#matlib-functions"},
+    {"include":"#file-io"},
     {"include":"#functions"},
     {"include":"#function-calls"},
     {"include":"#operators"},
@@ -31,7 +34,8 @@
   ],
   "repository": {
     "comments":{"patterns":[
-      {"name":"comment.line.double-slash.cnr","match":"//.*$"},
+      {"comment":"the lexer only ever recognizes '//' -- skipWhitespace() has no block-comment branch, so /* */ is NOT a real CnR comment form. It's kept here purely as an editor convenience (so stray /* */ in a file at least renders as a comment instead of as broken syntax), not because the interpreter understands it.",
+       "name":"comment.line.double-slash.cnr","match":"//.*$"},
       {"name":"comment.block.cnr","begin":"/\\*","end":"\\*/",
        "patterns":[{"name":"keyword.other.todo.cnr","match":"\\b(TODO|FIXME|BUG|NOTE|WARNING|HACK)\\b"}]}
     ]},
@@ -41,26 +45,31 @@
     "numbers":{"patterns":[{"name":"constant.numeric.cnr","match":"\\b\\d[\\d_]*(?:\\.\\d[\\d_]*)?(?:[eE][+-]?\\d+)?\\b"}]},
 
     "constants":{"patterns":[
-      {"comment":"global preset variables, not lexer keywords -- pi/euler/phi/psi are BigFloat constants set at startup",
-       "name":"constant.language.cnr","match":"\\b(pi|euler|phi|psi|null|true|false)\\b"}
+      {"comment":"global preset variables, not lexer keywords -- pi/euler/phi/psi are BigFloat constants set at startup by the math bridge. true/false ARE real lexer keywords (TrueKw/FalseKw). null is not a TokType in this lexer at all; kept here defensively in case a later build adds it, but as written CnR has no null literal.",
+       "name":"constant.language.cnr","match":"\\b(pi|euler|phi|psi|true|false|null)\\b"}
     ]},
 
-    "keywords":{"patterns":[
-      {"comment":"real control-flow/statement keywords recognized by the lexer's keywordTable(); this language has no break/continue/switch/case/default/do/import/using/namespace",
-       "name":"keyword.control.cnr","match":"\\b(var|if|else|while|for|return|function|try|catch|Throw)\\b"},
+    "control-keywords":{"patterns":[
+      {"comment":"real control-flow/statement keywords in keywordTable(): var/print/if/else/while/for/function/return/try/catch/Throw, PLUS switch/case/default/break/continue and mutable, all of which genuinely exist as TokTypes and are parsed (parseSwitch/parseBreak/parseContinue). This language does NOT have do/import/using/namespace.",
+       "name":"keyword.control.cnr","match":"\\b(var|if|else|while|for|return|function|try|catch|Throw|mutable)\\b"},
       {"name":"keyword.control.struct.cnr","match":"\\bStruct\\b"},
       {"name":"keyword.control.database.cnr","match":"\\b(Data|table)\\b"},
       {"name":"keyword.control.len.cnr","match":"\\blen\\b"},
       {"name":"keyword.control.print.cnr","match":"\\bprint\\b"}
     ]},
 
+    "switch-case":{"patterns":[
+      {"comment":"switch/case/default/break/continue are real TokTypes (SwitchKw/CaseKw/DefaultKw/BreakKw/ContinueKw) parsed by parseSwitch()/parseBreak()/parseContinue() -- first matching case runs (no fallthrough), break exits a case or a while/for loop, continue is valid in while/for/switch.",
+       "name":"keyword.control.switch.cnr","match":"\\b(switch|case|default|break|continue)\\b"}
+    ]},
+
     "types":{"patterns":[
-      {"comment":"only these have dedicated TokType entries; there is no bool/void/double keyword -- double-precision numbers are just the language's native 'var' number type",
+      {"comment":"only these have dedicated TokType entries (CharKw/StringKw/IntKw/LongKw/FloatKw/BigIntKw/BigFloatKw). bigDouble is a lexer alias for BigFloatKw, not a separate type. There is no bool/void/double keyword -- double-precision numbers are just the language's native 'var' number type.",
        "name":"storage.type.cnr","match":"\\b(char|string|Int|long|Float|BigInt|BigFloat|bigDouble)\\b"}
     ]},
 
     "casts":{"patterns":[
-      {"comment":"(Type)expr casts -- the only ones the parser recognizes: (char), (char[]), (string), (Int), (long), (Float), (BigInt), (BigFloat) or (BigFloat(precision)). There is no (bool) or (double) cast. The inner (precision) in BigFloat(N) is left to #numbers/#operators to scope as an ordinary parenthesized number.",
+      {"comment":"(Type)expr casts -- the only ones the parser builds dedicated *CastExpr nodes for: (char), (char[]), (string), (Int), (long), (Float), (BigInt), (BigFloat) or (BigFloat(precision)). There is no (bool) or (double) cast. The inner (precision) in BigFloat(N) is left to #numbers/#operators to scope as an ordinary parenthesized number. BigFloat(N) ALSO has a standalone (non-cast) form -- see #functions -- used as `var x = BigFloat(50);` to build a zero-valued BigDecimal at N fractional digits.",
        "name":"storage.type.cast.cnr","match":"(?<=\\()(char|string|Int|long|Float|BigInt|BigFloat|bigDouble)(?=(\\s*\\[\\s*\\]\\s*)?\\))"}
     ]},
 
@@ -83,30 +92,46 @@
     "function-calls":{"patterns":[{"name":"entity.name.function.call.cnr","match":"\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"}]},
 
     "functions":{"patterns":[
-      {"comment":"complete builtin math-function whitelist from isMathBuiltinName() -- note arcsin/arccos/arctan (not asin/acos/atan), and ln alongside log/log10",
+      {"comment":"complete builtin math-function whitelist from isMathBuiltinName() -- note arcsin/arccos/arctan (not asin/acos/atan), and ln alongside log/log10. These are distinct from the mathDefine()/symbolic MathLib bridge builtins below (#mathlib-functions), which operate on named symbolic functions rather than plain numeric args.",
        "name":"support.function.cnr","match":"\\b(sqrt|sqroot|pow|abs|floor|ceil|round|log|ln|log10|exp|sin|cos|tan|arcsin|arccos|arctan|isPrime|min|max|random|randomSeed)\\b"},
+      {"comment":"BigFloat(N) standalone constructor form (not a cast) -- `var x = BigFloat(50);`. Highlighted as a callable alongside the type keyword above since it behaves like a builtin function in this position.",
+       "name":"support.function.bigfloat-ctor.cnr","match":"(?<=\\bvar\\s{0,20}=\\s{0,20})\\bBigFloat(?=\\s*\\()"},
+      {"comment":"mutex() constructs a fresh, independent OS mutex (shared_ptr<std::mutex>). It is an ordinary function call, not a type/cast -- 'mutex' the identifier is only meaningful when immediately followed by '('.",
+       "name":"support.function.mutex-ctor.cnr","match":"\\bmutex(?=\\s*\\()"},
       {"name":"support.function.array-method.cnr","match":"(?<=\\.)\\b(push|pop|sort|reverse|contains|indexOf|accumulate)\\b"}
     ]},
 
+    "file-io":{"patterns":[
+      {"comment":"native file I/O builtins -- readFile/fileExists throw a catchable runtime error on missing files; writeFile overwrites, appendFile creates-or-appends.",
+       "name":"support.function.file-io.cnr","match":"\\b(readFile|writeFile|appendFile|fileExists)\\b"}
+    ]},
+
     "mathlib-functions":{"patterns":[
-      {"comment":"MathLib bridge builtins (math_bridge.inc) -- symbolic function definition/calculus/domain/limits, all keyed by a mathDefine()'d function name string",
-       "name":"support.function.mathlib.cnr","match":"\\b(mathDefine|mathEval|mathToString|mathDerivative|mathIntegral|mathDefiniteIntegral|mathTaylorSeries|mathDomain|mathDomainExact|mathImage|mathLimit|mathLimitAtInfinity|mathSum|mathProduct|mathIsBijective|mathInverse|mathNumericInverseAt|mathRoots|mathRootsImag|divisors)\\b"}
+      {"comment":"MathLib bridge builtins, verified directly against callMathLibBuiltin() in math_bridge.inc: mathDefine (function definition, single- and multi-variable), mathEval, mathToString, mathDerivative, mathGradient (multivariable derivative -- distinct from mathDerivative), mathIntegral, mathDefiniteIntegral, mathTaylorSeries, mathDomain, mathDomainExact, mathImage, mathLimit, mathLimitAtInfinity, mathSum, mathProduct, mathIsBijective, mathInverse, mathNumericInverseAt, mathRoots/mathRootsImag, divisors. 'define' is a real short alias for mathDefine (name0==\"define\" is rewritten to \"mathDefine\" before dispatch) -- both forms genuinely work.",
+       "name":"support.function.mathlib.cnr","match":"\\b(mathDefine|define|mathEval|mathToString|mathDerivative|mathGradient|mathIntegral|mathDefiniteIntegral|mathTaylorSeries|mathDomain|mathDomainExact|mathImage|mathLimit|mathLimitAtInfinity|mathSum|mathProduct|mathIsBijective|mathInverse|mathNumericInverseAt|mathRoots|mathRootsImag|divisors)\\b"},
+      {"comment":"complexEval(\"expr string\") -- the actual complex-number arithmetic entry point in math_bridge.inc. Parses and evaluates an expression string where 'i' is the imaginary unit and 'sen' is accepted as an alias for 'sin'; returns {re, im} (or a plain number if the imaginary part is negligible). This is genuinely how CnR does complex arithmetic -- there is no dedicated Complex type/literal in the core lexer (see #types), it's entirely string-expression-driven through this one builtin.",
+       "name":"support.function.mathlib.complex.cnr","match":"\\bcomplexEval\\b"}
     ]},
 
     "matlib-functions":{"patterns":[
-      {"comment":"MathLib bridge builtins for Matrix values (var[][] arrays)",
+      {"comment":"MathLib bridge builtins for Matrix values (var[][] arrays), verified directly against callMathLibBuiltin() in math_bridge.inc.",
        "name":"support.function.matlib.cnr","match":"\\b(matDeterminant|matInverse|matRank|matSolve|matEigenvalues|matEigenvaluesImag|matTranspose|matMultiply)\\b"}
     ]},
 
     "http-client":{"patterns":[
       {"name":"support.class.http.cnr","match":"\\bHttp\\b"},
       {"name":"support.function.http-method.cnr","match":"(?<=Http\\.)\\b(GET|POST|PUT|PATCH|DELETE)\\b"},
-      {"name":"keyword.control.http-options.cnr","match":"\\b(header|body)\\b"}
+      {"comment":"header/body ARE real lexer keywords (HeaderKw/BodyKw), unlike Server/start which are soft keywords.",
+       "name":"keyword.control.http-options.cnr","match":"\\b(header|body)\\b"}
     ]},
 
-    "server":{"patterns":[{"name":"support.class.server.cnr","match":"\\bServer(?=\\s*\\()"}]},
+    "server":{"patterns":[
+      {"comment":"'Server' and 'start' are soft keywords -- recognized by matching the identifier's text (peek().text==\"Server\"/\"start\"), not real TokTypes. Same treatment as the array/DB method names.",
+       "name":"support.class.server.cnr","match":"\\bServer(?=\\s*\\()"},
+      {"name":"support.function.server-start.cnr","match":"(?<=\\.)\\bstart\\b(?=\\s*\\()"}
+    ]},
 
-    "routes":{"patterns":[{"name":"support.function.http-method.cnr","match":"(?<=\\.)\\b(GET|POST|PUT|PATCH|DELETE|start)\\b"}]},
+    "routes":{"patterns":[{"name":"support.function.http-method.cnr","match":"(?<=\\.)\\b(GET|POST|PUT|PATCH|DELETE)\\b(?=\\s*\\()"}]},
 
     "request-response":{"patterns":[
       {"comment":"request/response are ordinary scope-bound objects inside route handlers, not lexer keywords -- highlighted as known globals, not as language keywords",
@@ -114,10 +139,13 @@
       {"name":"variable.other.property.cnr","match":"(?<=\\.)[A-Za-z_][A-Za-z0-9_]*"}
     ]},
 
-    "database":{"patterns":[{"name":"support.function.database-method.cnr","match":"(?<=\\.)\\b(find|findWhere|findById|get|getById|insert|updateWhere|updateById|delete|deleteWhere|deleteById|push|save|load|count|orderBy|encode)\\b"}]},
+    "database":{"patterns":[
+      {"comment":"exact isDbMethodName() list: encode, push, find, delete, insert, save, load, count, findWhere, updateWhere, deleteWhere, findById, updateById, deleteById, orderBy, get, getById. Note 'push' is shared with the array-method list -- context (preceding Data/table identifier vs. array variable) disambiguates at runtime, but for highlighting purposes both patterns match the same way.",
+       "name":"support.function.database-method.cnr","match":"(?<=\\.)\\b(find|findWhere|findById|get|getById|insert|updateWhere|updateById|delete|deleteWhere|deleteById|push|save|load|count|orderBy|encode)\\b"}
+    ]},
 
     "nodes-workflow":{"patterns":[
-      {"comment":"Nodes NAME { StepA() { ... }; StepB(StepA) -> OnFail(Retry = N) { ... }; }",
+      {"comment":"Nodes NAME { StepA() { ... }; StepB(StepA) -> OnFail(Retry = N) { ... }; Fail(); } -- all four are real TokTypes (NodesKw/OnFailKw/RetryKw/FailKw).",
        "name":"keyword.control.nodes.cnr","match":"\\b(Nodes|OnFail|Retry|Fail)\\b"}
     ]},
 
@@ -127,9 +155,17 @@
 
     "threads":{"patterns":[{"name":"support.function.thread.cnr","match":"\\b(thread|join|joinAll)\\b"}]},
 
+    "mutex":{"patterns":[
+      {"comment":"mutable is a real keyword modifier (MutableKw) used as `mutable var x = ...;` to get a cross-thread-visible cell. mutex itself is the TokType MutexKw but is used as a plain callable identifier -- see #functions for the mutex() constructor.",
+       "name":"keyword.control.mutable.cnr","match":"\\bmutable\\b"},
+      {"comment":".lock()/.unlock()/.tryLock() -- called on a mutex-valued expression (a mutex() literal, a mutable variable, or a struct field holding a mutex). Recognized by method-name text after '.', like the array/DB methods.",
+       "name":"support.function.mutex-method.cnr","match":"(?<=\\.)\\b(lock|unlock|tryLock)\\b(?=\\s*\\()"}
+    ]},
+
     "operators":{"patterns":[
-      {"comment":"the complete operator/punctuation set the lexer actually tokenizes (Plus..GreaterEqual, AndAnd/OrOr/Bang, Dot/Colon) -- this language has no ++/--/+=/-=/*=//=/%=/<</>>/::/? tokens. '->' is kept only because Nodes blocks write `Step() -> OnFail(...)`, tokenized as separate '-' and '>' but read as an arrow.",
-       "name":"keyword.operator.cnr","match":"(->|==|!=|<=|>=|&&|\\|\\||\\+|-|\\*|/|%|=|<|>|!|\\.|:)"},
+      {"comment":"the complete operator/punctuation set the lexer actually tokenizes. This DOES include ++/--/+=/-=/*=//= (PlusPlus/MinusMinus/PlusAssign/MinusAssign/StarAssign/SlashAssign are all real TokTypes, lexed and consumed by the parser for both plain variables and array elements) -- earlier documentation claiming these don't exist was wrong. There is still no %=, <<, >>, ::, or ?: in this lexer. '->' is kept only because Nodes blocks write `Step() -> OnFail(...)`, tokenized as separate '-' and '>' but read as an arrow.",
+       "name":"keyword.operator.compound.cnr","match":"(\\+\\+|--|\\+=|-=|\\*=|/=)"},
+      {"name":"keyword.operator.cnr","match":"(->|==|!=|<=|>=|&&|\\|\\||\\+|-|\\*|/|%|=|<|>|!|\\.|:)"},
       {"name":"punctuation.separator.comma.cnr","match":","},
       {"name":"punctuation.terminator.statement.cnr","match":";"},
       {"name":"punctuation.paren.cnr","match":"[()]"},

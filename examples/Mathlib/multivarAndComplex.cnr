@@ -1,0 +1,60 @@
+// ============================================================================
+// New MathLib features: multivariable calculus + complex arithmetic
+// ============================================================================
+
+
+// ==========================================================
+// Multivariable calculus
+// ==========================================================
+
+print("=== Multivariable calculus ===");
+
+// define(...) is a short alias for mathDefine(...); both accept any number
+// of parameters, e.g. f(x,y), g(x,y,z), ...
+define("f(x,y) = x^2*y + y^3");
+print(mathToString("f"));
+
+// mathEval("f", x, y) -- one value per parameter, in declaration order
+print(mathEval("f", 2, 3));          // 2^2*3 + 3^3 = 39
+
+// mathDerivative("f", "varName") -- partial derivative wrt a named variable
+print(mathDerivative("f", "x"));     // d/dx = 2*x*y
+print(mathDerivative("f", "y"));     // d/dy = x^2 + 3*y^2
+
+// mathGradient("f") -- partials wrt every parameter, as an object
+var grad = mathGradient("f");
+print(grad.x);
+print(grad.y);
+
+// works the same way for any number of variables
+define("g(x,y,z) = x*y*z + x^2");
+print(mathEval("g", 2, 3, 4));       // 2*3*4 + 2^2 = 28
+print(mathDerivative("g", "z"));     // x*y
+
+
+// ==========================================================
+// Complex number arithmetic
+// ==========================================================
+
+print("=== Complex number arithmetic ===");
+
+// complexEval(expr) parses and evaluates a plain arithmetic expression in
+// complex mode: 'i' is the imaginary unit. "2i" already works via CnR's
+// existing implicit-multiplication grammar (same rule that lets "2x" mean
+// 2*x). The result prints as "a+bi"; a negligible imaginary part collapses
+// to a plain real number automatically.
+print(complexEval("2i * 5"));                 // 0+10i
+
+// "sen" (Portuguese/Spanish for sine) works as an alias for "sin"
+print(complexEval("(5 + 20i) * (sen(pi/2)*i + cos(pi))")); // -25-15i
+
+print(complexEval("(3 + 4i) + (1 - 2i)"));    // 4+2i
+print(complexEval("(1 + i) * (1 - i)"));      // 2 (imaginary part cancels)
+print(complexEval("i^2"));                    // -1
+print(complexEval("sqrt(-1)"));               // 0+1i
+
+// the result is a real CnR value: {re, im} fields when non-real, so you can
+// still pull out the parts individually
+var z = complexEval("(5 + 20i) * (sen(pi/2)*i + cos(pi))");
+print(z.re);   // -25
+print(z.im);   // -15

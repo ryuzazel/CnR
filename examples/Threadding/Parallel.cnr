@@ -1,13 +1,31 @@
-function square(var x)
-{
-    return x * x;
-}
 
 
-Parallel
-{
-    print(square(2));
+function work(var label) {
+    var sum = 0;
+    var i = 0;
+    while (i < 1000000) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    print("block " + label + " finished, sum = " + sum);
+}
+
+print("Starting Parallel(maxThreads = 2) with 5 blocks...");
+
+Parallel(maxThreads = 2) {
+    work(1);
 }
 {
-    print(square(4));
+    work(2);
 }
+{
+    work(3);
+}
+{
+    work(4);
+}
+{
+    work(5);
+}
+
+print("All Parallel blocks completed.");

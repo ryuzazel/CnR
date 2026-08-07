@@ -17,13 +17,23 @@
 #include <random>
 #include <cstdio>
 #include <cmath>
+#include <mutex>
 #include <complex>
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#include <direct.h>
+#define getcwd _getcwd
+#define chdir _chdir
+#endif
+
 
 enum class TokType {
     Number, Ident, String,
     Var, Print, If, Else, While, For, TrueKw, FalseKw, CharKw, LenKw, StringKw,
     Function, Return, StructKw,
     Parallel, ThreadKw, JoinKw, JoinAllKw,
+    MutableKw, MutexKw,
     HttpKw, HeaderKw, BodyKw,
     NodesKw, OnFailKw, RetryKw, FailKw,
     TryKw, CatchKw, ThrowKw,
@@ -98,6 +108,7 @@ struct Lexer {
             {"BigInt", TokType::BigIntKw}, {"BigFloat", TokType::BigFloatKw}, {"bigDouble", TokType::BigFloatKw},
             {"switch", TokType::SwitchKw}, {"case", TokType::CaseKw}, {"default", TokType::DefaultKw},
             {"break", TokType::BreakKw}, {"continue", TokType::ContinueKw},
+            {"mutable", TokType::MutableKw}, {"mutex", TokType::MutexKw},
         };
         return kw;
     }
@@ -234,7 +245,8 @@ enum class ExprKind {
     Number, Bool, Var, Unary, Binary, CharCast, StringCast, IntCast, LongCast,
     FloatCast, BigIntCast, BigFloatCast, StringLit, JsonObjectLit, HttpCall,
     Len, ArrayAccess, TensorAccess, Call, MemberAccess, Thread, Join, JoinAll,
-    ArrayMethodCall, Fail, Throw, ServerConfig, ObjectMethodCall, DbMethodCall
+    ArrayMethodCall, Fail, Throw, ServerConfig, ObjectMethodCall, DbMethodCall,
+    MutexNew, MutexMethodCall
 };
 enum class StmtKind {
     VarDecl, Assign, ArrayAssign, MemberAssign, Print, Block, If, While, For,
@@ -296,6 +308,23 @@ struct ThreadExpr : Expr { std::string fnName; std::vector<ExprPtr> args; Thread
 struct JoinExpr : Expr { ExprPtr handleExpr; JoinExpr():Expr(ExprKind::Join){} };
 struct JoinAllExpr : Expr { std::string arrayName; JoinAllExpr():Expr(ExprKind::JoinAll){} };
 
+// mutex() -- constructs a new mutex value. Backed by a shared_ptr<std::mutex>
+// in ValueExtra, so copies of the returned Value (e.g. captured into a
+// thread()/Parallel{} closure, or stored as a struct field) all refer to the
+// SAME underlying OS mutex -- this is what makes it usable for cross-thread
+// synchronization instead of each copy locking its own independent mutex.
+struct MutexNewExpr : Expr { MutexNewExpr():Expr(ExprKind::MutexNew){} };
+
+// m.lock() / m.unlock() / m.tryLock() -- called on a mutex-valued expression
+// (almost always a bare variable, but base can be any expression that
+// evaluates to a mutex Value, e.g. a struct field holding a mutex).
+enum class MutexMethod { Lock, Unlock, TryLock };
+struct MutexMethodCallExpr : Expr {
+    ExprPtr base;
+    MutexMethod method;
+    MutexMethodCallExpr():Expr(ExprKind::MutexMethodCall){}
+};
+
 enum class ArrayMethod { Push, Pop, Sort, Reverse, Contains, IndexOf, Accumulate };
 struct ArrayMethodCallExpr : Expr { std::string arrayName; ArrayMethod method; ExprPtr arg; ArrayMethodCallExpr():Expr(ExprKind::ArrayMethodCall){} };
 
@@ -307,6 +336,19 @@ struct VarDeclStmt : Stmt {
     // above unchanged. nestedInit holds the {{...},{...}} literal tree.
     int tensorRank = 0;
     std::shared_ptr<NestedArrayLitExpr> nestedInit;
+    // `mutable var x = ...;` -- wraps the initial value in a SharedCell (see
+    // ValueExtra::cell below) instead of storing it directly in the scope
+    // slot. Value copies of a mutable variable (into a thread()/Parallel{}
+    // closure's captured scope, a struct field, an array element, etc.) all
+    // share the SAME cell, so writes from one thread become visible to every
+    // holder of a copy -- this is the language's cross-thread mutable/shared
+    // state primitive. Reads/writes through the normal var name auto-lock
+    // the cell's own mutex for the duration of the single read/write, so
+    // ordinary `x = x + 1;`-style code is race-free without the programmer
+    // touching a mutex directly; `.lock()`/`.unlock()` (see MutexMethodCall)
+    // are still available on a mutable variable for a wider critical section
+    // spanning several statements.
+    bool isMutable = false;
     VarDeclStmt():Stmt(StmtKind::VarDecl){}
 };
 struct AssignStmt : Stmt { std::string name; ExprPtr value; AssignStmt():Stmt(StmtKind::Assign){} };
@@ -340,7 +382,13 @@ struct SwitchStmt : Stmt {
     std::shared_ptr<BlockStmt> defaultBody; // null if no default clause
     SwitchStmt():Stmt(StmtKind::Switch){}
 };
-struct ParallelStmt : Stmt { std::vector<std::shared_ptr<BlockStmt>> blocks; ParallelStmt():Stmt(StmtKind::Parallel){} };
+// maxThreads==0 means "unbounded" (original behavior: every block gets its
+// own std::thread, all launched immediately). maxThreads>0 means the runtime
+// caps how many blocks run concurrently -- Parallel(maxThreads = 2) { a }{b}{c}
+// runs at most 2 of {a,b,c} at once, queuing the rest, letting a program
+// bound its own concurrency (e.g. to match CPU count or a rate limit)
+// instead of always spawning one OS thread per block.
+struct ParallelStmt : Stmt { std::vector<std::shared_ptr<BlockStmt>> blocks; int maxThreads = 0; ParallelStmt():Stmt(StmtKind::Parallel){} };
 
 // --- DAG / Nodes workflow ---
 
@@ -702,6 +750,22 @@ struct Parser {
                 expr = j;
                 continue;
             }
+            // m.lock() / m.unlock() / m.tryLock() -- called on any expression
+            // that evaluates to a mutex Value (a `mutex()` literal, a mutable
+            // variable, a struct field holding a mutex, etc).
+            if(peek(1).type == TokType::Ident && peek(2).type == TokType::LParen &&
+               (peek(1).text == "lock" || peek(1).text == "unlock" || peek(1).text == "tryLock")) {
+                std::string methodName = peek(1).text;
+                advance(); advance(); advance(); // '.' name '('
+                expect(TokType::RParen,")");
+                auto mc = std::make_shared<MutexMethodCallExpr>();
+                mc->base = expr;
+                mc->method = methodName == "lock" ? MutexMethod::Lock
+                           : methodName == "unlock" ? MutexMethod::Unlock
+                           : MutexMethod::TryLock;
+                expr = mc;
+                continue;
+            }
             if(peek(1).type == TokType::JoinAllKw && peek(2).type == TokType::LParen) {
                 if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
                     advance(); advance(); advance(); // . joinAll (
@@ -758,6 +822,11 @@ struct Parser {
         if(check(TokType::Number)) { Token t = advance(); return std::make_shared<NumberExpr>(t.number, t.text); }
         if(match(TokType::TrueKw)) return std::make_shared<BoolExpr>(true);
         if(match(TokType::FalseKw)) return std::make_shared<BoolExpr>(false);
+        if(match(TokType::MutexKw)) {
+            expect(TokType::LParen,"(");
+            expect(TokType::RParen,")");
+            return std::make_shared<MutexNewExpr>();
+        }
         if(match(TokType::ThreadKw)) {
             expect(TokType::LParen,"(");
             auto t = std::make_shared<ThreadExpr>();
@@ -1046,9 +1115,10 @@ struct Parser {
         return node;
     }
 
-    StmtPtr parseVarDecl(bool consumeSemicolon = true) {
+    StmtPtr parseVarDecl(bool consumeSemicolon = true, bool isMutable = false) {
         expect(TokType::Var,"var");
         auto stmt = std::make_shared<VarDeclStmt>();
+        stmt->isMutable = isMutable;
         if(check(TokType::LBracket) && peek(1).type == TokType::RBracket) {
             int rank = consumeBracketPairs();
             stmt->name = expect(TokType::Ident,"identifier").text;
@@ -1404,6 +1474,17 @@ struct Parser {
     StmtPtr parseParallel() {
         expect(TokType::Parallel,"Parallel");
         auto stmt = std::make_shared<ParallelStmt>();
+        if(match(TokType::LParen)) {
+            if(!check(TokType::Ident) || peek().text != "maxThreads")
+                throw std::runtime_error("Expected 'maxThreads' inside 'Parallel(...)', line " + std::to_string(peek().line));
+            advance(); // 'maxThreads'
+            expect(TokType::Assign,"=");
+            auto n = expect(TokType::Number,"maxThreads value");
+            stmt->maxThreads = (int)n.number;
+            if(stmt->maxThreads < 1)
+                throw std::runtime_error("'Parallel(maxThreads = N)' requires N >= 1, line " + std::to_string(peek().line));
+            expect(TokType::RParen,")");
+        }
         stmt->blocks.push_back(parseBlock());
         while(check(TokType::LBrace)) stmt->blocks.push_back(parseBlock());
         if(stmt->blocks.size() < 2)
@@ -1532,6 +1613,12 @@ struct Parser {
     }
 
     StmtPtr parseStatement() {
+        if(check(TokType::MutableKw)) {
+            advance(); // 'mutable'
+            if(!check(TokType::Var))
+                throw std::runtime_error("Expected 'var' after 'mutable', line " + std::to_string(peek().line));
+            return parseVarDecl(true, /*isMutable=*/true);
+        }
         if(check(TokType::Var)) return parseVarDecl();
         if(check(TokType::Print)) return parsePrint();
         if(check(TokType::If)) return parseIf();
@@ -2122,6 +2209,23 @@ enum class NumKind { Plain, F32, I32, I64, BigF, Big };
 // them combined.
 struct Value; // forward declaration: ValueExtra holds containers of Value
 
+// Backing store for a `mutable var` binding (see VarDeclStmt::isMutable).
+// One SharedCell is allocated at declaration time; every Value copy derived
+// from that variable (thread()/Parallel{} capture, struct field, array
+// element, a plain `var y = x;` alias, etc.) points at the SAME SharedCell
+// via shared_ptr, so mutations made through any copy, from any thread, are
+// visible to every other holder once they take mtx. `payload` holds the
+// actual current value (number/string/bool/array/struct/...); the owning
+// Value itself (the one stored in a scope slot) is otherwise just a thin
+// handle with ValueExtra::cell set and isMutableCell=true.
+struct SharedCell {
+    std::mutex mtx;
+    std::shared_ptr<Value> payload; // Value is incomplete at this point, but
+                                     // shared_ptr<T> only needs T complete at
+                                     // the point of dereference/construction,
+                                     // both of which happen later in the file.
+};
+
 struct ValueExtra {
     bool isThread = false;
     std::string structType;
@@ -2132,10 +2236,30 @@ struct ValueExtra {
     bool isServer = false;
     std::shared_ptr<struct ServerInstance> server;
     bool isLenientMap = false; // true for request.query/.params/.header/.cookie: missing key -> "" instead of throwing
+    // true for the {re, im} objects complexEval()/complexToCnrValue() (see
+    // math_bridge.inc) return for a non-negligible imaginary part, so
+    // valueToDisplayString() can print "a+bi" instead of the generic
+    // "[object]" -- the fields are still plain doubles under .re/.im, this
+    // only changes how print()/string-concat display the whole value.
+    bool isComplexNumber = false;
     bool isDatabase = false;
     std::shared_ptr<struct DatabaseInstance> database;
     std::shared_ptr<BigDecimal> bigDec;
     std::shared_ptr<BigInt> big;
+
+    // ---- Mutex / Mutable primitives ----
+    // mutex() values: isMutex + mutexPtr. A raw, explicitly-controlled
+    // std::mutex the program locks/unlocks itself via .lock()/.unlock()/
+    // .tryLock() -- e.g. to guard a wider critical section than a single
+    // mutable variable's auto-lock covers, or to synchronize something that
+    // isn't itself a CnR value (ordering of print statements, external I/O,
+    // etc). shared_ptr so every copy of the Value refers to one real mutex.
+    bool isMutex = false;
+    std::shared_ptr<std::mutex> mutexPtr;
+
+    // `mutable var` values: isMutableCell + cell. See SharedCell above.
+    bool isMutableCell = false;
+    std::shared_ptr<SharedCell> cell;
 };
 
 struct Value {
@@ -2177,6 +2301,29 @@ struct Value {
     static Value makeObject() { Value v; v.isObject = true; v.ex().object = std::make_shared<std::unordered_map<std::string, Value>>(); return v; }
     static Value makeObjectArray() { Value v; v.isObject = true; v.ex().isObjectArray = true; v.ex().objectArray = std::make_shared<std::vector<Value>>(); return v; }
     static Value makeBool2(bool b) { Value v; v.isBool = true; v.boolean = b; return v; }
+
+    // mutex() -- a fresh, independent OS mutex. Every std::make_shared call
+    // here allocates a brand-new std::mutex, so two separate `mutex()`
+    // expressions never alias each other; aliasing only happens when a
+    // single mutex Value is copied (assignment, argument passing, closure
+    // capture), which is exactly the sharing a cross-thread lock needs.
+    static Value makeMutex() {
+        Value v;
+        v.ex().isMutex = true;
+        v.ex().mutexPtr = std::make_shared<std::mutex>();
+        return v;
+    }
+
+    // `mutable var name = initial;` -- wraps `initial` in a new SharedCell.
+    // The returned Value is a thin handle (isMutableCell=true); the actual
+    // data lives in cell->payload and is reached through it.
+    static Value makeMutableCell(Value initial) {
+        Value v;
+        v.ex().isMutableCell = true;
+        v.ex().cell = std::make_shared<SharedCell>();
+        v.ex().cell->payload = std::make_shared<Value>(std::move(initial));
+        return v;
+    }
 };
 
 // ---- Matrix/Tensor helpers (row-major flat storage in Value::array) ----
@@ -2259,9 +2406,33 @@ std::string valueToDisplayString(const Value& v) {
     if(v.isNull) return "null";
     if(v.isString) return v.str;
     if(v.isBool) return v.boolean ? "true" : "false";
+    if(v.isObject && v.cex().isComplexNumber) {
+        double re = (*v.cex().object).at("re").number;
+        double im = (*v.cex().object).at("im").number;
+        std::ostringstream oss;
+        auto fmtNum = [](double d) {
+            std::ostringstream o;
+            if(d == (long long)d) o << (long long)d; else o << d;
+            return o.str();
+        };
+        oss << fmtNum(re) << (im < 0 ? "-" : "+") << fmtNum(std::fabs(im)) << "i";
+        return oss.str();
+    }
     if(v.isObject) return v.cex().isObjectArray ? "[array]" : "[object]";
     if(v.isStruct) return "[struct " + v.cex().structType + "]";
     if(v.cex().isDatabase) return "[database]";
+    if(v.cex().isMutex) return "[mutex]";
+    if(v.cex().isMutableCell) {
+        // A `mutable var` handle has no useful display of its own -- show
+        // whatever it currently wraps instead (a mutable int prints like an
+        // int, a mutable struct prints like a struct, etc). Held under the
+        // cell's lock for the duration of the recursive call so a concurrent
+        // mutableAssign() can't be observed half-written.
+        auto cell = v.cex().cell;
+        if(!cell || !cell->payload) return "null";
+        std::lock_guard<std::mutex> lock(cell->mtx);
+        return valueToDisplayString(*cell->payload);
+    }
     if(v.isArray && !v.dims.empty()) return tensorToDisplayString(v);
     if(v.isArray) {
         // Plain 1-D array: print its elements, e.g. [1,2,3], instead of the
@@ -2299,6 +2470,30 @@ std::string valueToDisplayString(const Value& v) {
 //   - everything else (numbers, bools): numeric compare, bools as 0/1
 // Mismatched kinds (e.g. an array vs a string) are never equal.
 bool valuesEqual(const Value& a, const Value& b) {
+    // mutex(): no payload to compare, so equality is identity -- two
+    // mutex() values are == only if they're the *same* shared mutex (i.e.
+    // one was copied/assigned from the other), matching how the language
+    // already treats lock()/unlock() as operating on one shared std::mutex
+    // per mutexPtr.
+    if(a.cex().isMutex || b.cex().isMutex) {
+        if(!a.cex().isMutex || !b.cex().isMutex) return false;
+        return a.cex().mutexPtr && a.cex().mutexPtr == b.cex().mutexPtr;
+    }
+    // `mutable var` handles: compare what they currently hold, not the
+    // handle itself, so e.g. `mutable var x = 5; var y = 6; x == y` works
+    // the same as it would for two plain variables. Each side is read
+    // under its own cell's lock (mutableRead-style) before delegating to
+    // the same comparison used for everything else.
+    if(a.cex().isMutableCell || b.cex().isMutableCell) {
+        auto readIfCell = [](const Value& v) -> Value {
+            if(!v.cex().isMutableCell) return v;
+            auto cell = v.cex().cell;
+            if(!cell || !cell->payload) return Value::makeNull();
+            std::lock_guard<std::mutex> lock(cell->mtx);
+            return *cell->payload;
+        };
+        return valuesEqual(readIfCell(a), readIfCell(b));
+    }
     if(a.isArray || b.isArray) {
         if(!a.isArray || !b.isArray) return false;
         if(a.array.size() != b.array.size()) return false;
@@ -2887,13 +3082,12 @@ struct NodeFailSignal {};
 struct CnrThrowSignal { std::string message; };
 
 #include <thread>
-#include <mutex>
+
 #include <future>
 #include <atomic>
 #include <cstring>
 #include "sck/sockets.h"
 #include <csignal>
-
 // ============================================================================
 // JSON support (parse + serialize) over the existing Value type.
 // Value already has isObject/object/isObjectArray/objectArray/isNull/isString
@@ -4087,12 +4281,125 @@ Value& lookupVar(const std::string& name) {
     throw std::runtime_error("Undefined variable '" + name + "'");
 }
 
-Value& resolveVar(const std::string& name) {
+// Copies out every binding in the top-level global scope (scopes.front()),
+// same technique already used for each Server connection's Interpreter (see
+// runServer): a shallow Value copy is cheap and safe to hand to another
+// thread, because heavy/shared payloads (objects, arrays, Data instances,
+// and -- the point of this helper's use in thread()/Parallel{} -- a
+// `mutable var`'s SharedCell) live behind a shared_ptr in Value::extra, so
+// the copy still refers to the SAME underlying cell/mutex/object as the
+// original. This is what makes a `mutable` global actually visible and
+// live-shared inside a thread()/Parallel{} worker instead of that worker
+// starting with an empty scope.
+std::vector<std::pair<std::string, Value>> snapshotGlobalScope() {
+    std::vector<std::pair<std::string, Value>> snap;
+    Scope& g = scopes.front();
+    if(g.big) {
+        snap.reserve(g.big->size());
+        for(auto& kv : *g.big) snap.emplace_back(kv.first, kv.second);
+    } else {
+        snap.reserve(g.small.size());
+        for(auto& kv : g.small) snap.emplace_back(kv.first, kv.second);
+    }
+    return snap;
+}
+
+// Like resolveVar(), but returns the raw scope slot without unwrapping a
+// `mutable` handle -- callers that need to inspect/lock the SharedCell
+// itself (e.g. StmtKind::Assign, so it can lock once and hold it across
+// evaluating the RHS) use this instead of resolveVar().
+Value& lookupVarRaw(const std::string& name) {
     if(currentSelf) {
         auto it = currentSelf->cex().fields->find(name);
         if(it != currentSelf->cex().fields->end()) return it->second;
     }
     return lookupVar(name);
+}
+
+Value& resolveVar(const std::string& name) {
+    Value& slot = lookupVarRaw(name);
+    // Transparently unwrap a `mutable var` handle to its live payload, so
+    // every existing call site (array indexing, struct field access,
+    // tensor assignment, array methods like push/pop, ...) keeps working
+    // unchanged whether or not the variable happens to be mutable. This
+    // does not itself take the cell's lock -- in-place structural
+    // mutations (push/pop/index-assign) go through the returned reference
+    // directly, same as any shared array/struct today. Use mutableRead/
+    // mutableAssign, or explicit .lock()/.unlock(), for a critical section
+    // that needs exclusivity across multiple statements or a whole-value
+    // read that must be atomic with respect to concurrent writers.
+    if(slot.cex().isMutableCell) return *slot.ex().cell->payload;
+    return slot;
+}
+
+// ---- Mutable/Mutex helpers ----
+//
+// A `mutable var x` scope slot holds a thin handle Value (isMutableCell,
+// pointing at a SharedCell); the actual data other code wants to read or
+// mutate lives in cell->payload. These helpers are the single place that
+// bridges "the handle in scope" and "the live value", so every read/write
+// path through a mutable variable goes through the same lock discipline
+// rather than each call site reinventing it.
+
+// Snapshot read: takes the cell's mutex just long enough to copy out its
+// current payload. Safe to call from any thread; the returned Value is an
+// independent copy (mutating it afterwards does NOT write back -- use
+// mutableAssign() for that).
+Value mutableRead(const Value& handle) {
+    auto cell = handle.cex().cell;
+    std::lock_guard<std::mutex> lock(cell->mtx);
+    return *cell->payload;
+}
+
+// Whole-value write: takes the cell's mutex just long enough to replace its
+// payload. Used by plain `x = expr;` when x is a mutable variable.
+void mutableAssign(Value& handle, Value newVal) {
+    auto cell = handle.cex().cell;
+    std::lock_guard<std::mutex> lock(cell->mtx);
+    *cell->payload = std::move(newVal);
+}
+
+// m.lock() / m.unlock() / m.tryLock() -- `base` may evaluate to either a
+// mutex() Value (isMutex/mutexPtr) or a `mutable var` handle (isMutableCell/
+// cell), so both a standalone mutex() and a mutable variable's own cell lock
+// can be used for a critical section spanning multiple statements, matching
+// the comment on VarDeclStmt::isMutable. tryLock() returns a bool: true if
+// the lock was acquired, false if it was already held (does not block).
+Value callMutexMethod(const std::shared_ptr<MutexMethodCallExpr>& mc) {
+    Value baseVal = evalToValue(mc->base);
+    std::mutex* rawMtx = nullptr;
+    if(baseVal.cex().isMutex && baseVal.cex().mutexPtr) {
+        rawMtx = baseVal.cex().mutexPtr.get();
+    } else if(baseVal.cex().isMutableCell && baseVal.cex().cell) {
+        rawMtx = &baseVal.cex().cell->mtx;
+    } else {
+        throw std::runtime_error("lock()/unlock()/tryLock() can only be called on a mutex() value or a mutable variable");
+    }
+    switch(mc->method) {
+    case MutexMethod::Lock:
+        rawMtx->lock();
+        return Value::makeNull();
+    case MutexMethod::Unlock:
+        rawMtx->unlock();
+        return Value::makeNull();
+    case MutexMethod::TryLock: {
+        Value v; v.isBool = true; v.boolean = rawMtx->try_lock();
+        return v;
+    }
+    }
+    throw std::runtime_error("Unknown mutex method");
+}
+
+// Resolves `name` and, if it's a mutable-cell handle, returns a reference to
+// the live payload (already under lock for the duration of the caller's use
+// -- callers that need the reference to outlive a single expression should
+// prefer mutableRead/mutableAssign or explicit .lock()/.unlock() instead,
+// since this does not hold the lock past the call). Plain (non-mutable)
+// variables pass through resolveVar() unchanged, so every existing call site
+// that doesn't care about Mutable keeps working exactly as before.
+Value& derefIfMutable(Value& v) {
+    if(v.cex().isMutableCell) return *v.ex().cell->payload;
+    return v;
 }
 
 // Walks a NestedArrayLitExpr (built from var[]...[] = {{...},{...}}) and
@@ -4290,6 +4597,16 @@ double evalNumber(const ExprPtr& expr)
         return callArrayMethod(am);
     }
 
+    case ExprKind::MutexMethodCall: {
+        // Only tryLock() has a meaningful numeric/bool value (lock()/unlock()
+        // return null); lock()/unlock() used in a numeric context is a
+        // program error, so let it fall through to the throw below via the
+        // null check.
+        Value v = callMutexMethod(std::static_pointer_cast<MutexMethodCallExpr>(expr));
+        if(v.isBool) return v.boolean ? 1.0 : 0.0;
+        throw std::runtime_error("Cannot use the result of lock()/unlock() as a number");
+    }
+
     default:
         break;
     }
@@ -4322,6 +4639,11 @@ bool evalBool(const ExprPtr& expr)
     case ExprKind::Binary: {
         auto op = std::static_pointer_cast<BinaryExpr>(expr);
         Value v = evalBinaryValue(op);
+        return v.isBool ? v.boolean : (valueToApproxDouble(v) != 0);
+    }
+
+    case ExprKind::MutexMethodCall: {
+        Value v = callMutexMethod(std::static_pointer_cast<MutexMethodCallExpr>(expr));
         return v.isBool ? v.boolean : (valueToApproxDouble(v) != 0);
     }
 
@@ -4381,6 +4703,10 @@ Value evalToValue(const ExprPtr& expr) {
         for(auto& kv : sc->entries) v.cex().server->config[kv.first] = evalToValue(kv.second);
         return v;
     }
+    case ExprKind::MutexNew:
+        return Value::makeMutex();
+    case ExprKind::MutexMethodCall:
+        return callMutexMethod(std::static_pointer_cast<MutexMethodCallExpr>(expr));
     case ExprKind::ObjectMethodCall:
         return callObjectMethod(std::static_pointer_cast<ObjectMethodCallExpr>(expr));
     case ExprKind::DbMethodCall:
@@ -4748,11 +5074,16 @@ Value spawnThread(const std::shared_ptr<ThreadExpr>& t) {
     auto structsCopy = structs;
     auto reg = threadRegistry;
     auto regMtx = registryMtx;
+    // See snapshotGlobalScope(): this is what makes `mutable` globals (and
+    // ordinary globals) visible inside the spawned thread instead of it
+    // starting with a completely empty scope.
+    auto globalSnapshot = snapshotGlobalScope();
 
-    record->worker = std::thread([record, fnCopy, functionsCopy, structsCopy, reg, regMtx, argVals]() mutable {
+    record->worker = std::thread([record, fnCopy, functionsCopy, structsCopy, reg, regMtx, argVals, globalSnapshot]() mutable {
         Interpreter worker(functionsCopy, structsCopy);
         worker.threadRegistry = reg;
         worker.registryMtx = regMtx;
+        for(auto& kv : globalSnapshot) worker.scopes.front()[kv.first] = kv.second;
         Value result;
         bool errored = false;
         std::string errMsg;
@@ -4834,6 +5165,135 @@ Value joinAllThreads(const std::shared_ptr<JoinAllExpr>& ja) {
     return results;
 }
 
+// ============================================================================
+// File I/O builtins: readFile / writeFile / appendFile / fileExists.
+// ----------------------------------------------------------------------------
+// CnR previously had no general file-reading facility -- only the .cnrdb
+// database format (via Data/table) could persist to disk. These four
+// builtins add plain text file I/O, e.g. for loading a training corpus:
+//
+//   var text = readFile("corpus.txt");       // throws (catchable) if missing
+//   if (fileExists("corpus.txt")) { ... }
+//   writeFile("out.txt", "hello");            // overwrites
+//   appendFile("log.txt", "line\n");          // appends, creates if missing
+//   print currentDirectory();                 // where relative paths resolve
+//   changeDirectory("/some/path");             // change it
+//
+// All paths are resolved relative to the process's current working
+// directory, same as the .cnrdb files already are. Errors (missing file,
+// permission denied, etc.) throw std::runtime_error so they're catchable
+// with an ordinary CnR try/catch, exactly like Throw()/other runtime errors.
+// ============================================================================
+
+static std::string requireStringArg(const std::vector<Value>& args, size_t idx, const std::string& fnName) {
+    if(idx >= args.size())
+        throw std::runtime_error(fnName + "(): expected at least " + std::to_string(idx + 1) + " argument(s)");
+    const Value& v = args[idx];
+    if(!v.isString)
+        throw std::runtime_error(fnName + "(): argument " + std::to_string(idx + 1) + " must be a string");
+    return v.str;
+}
+
+Value callReadFile(const std::vector<Value>& args) {
+    std::string path = requireStringArg(args, 0, "readFile");
+    std::ifstream f(path, std::ios::binary);
+    if(!f)
+        throw std::runtime_error("readFile(): could not open '" + path + "'");
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    if(f.bad())
+        throw std::runtime_error("readFile(): error reading '" + path + "'");
+    return Value::makeString(ss.str());
+}
+
+Value callWriteFile(const std::vector<Value>& args) {
+    std::string path = requireStringArg(args, 0, "writeFile");
+    std::string content = requireStringArg(args, 1, "writeFile");
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if(!f)
+        throw std::runtime_error("writeFile(): could not open '" + path + "' for writing");
+    f << content;
+    if(f.bad())
+        throw std::runtime_error("writeFile(): error writing '" + path + "'");
+    return Value::makeBool2(true);
+}
+
+Value callAppendFile(const std::vector<Value>& args) {
+    std::string path = requireStringArg(args, 0, "appendFile");
+    std::string content = requireStringArg(args, 1, "appendFile");
+    std::ofstream f(path, std::ios::binary | std::ios::app);
+    if(!f)
+        throw std::runtime_error("appendFile(): could not open '" + path + "' for appending");
+    f << content;
+    if(f.bad())
+        throw std::runtime_error("appendFile(): error appending to '" + path + "'");
+    return Value::makeBool2(true);
+}
+
+Value callFileExists(const std::vector<Value>& args) {
+    std::string path = requireStringArg(args, 0, "fileExists");
+    std::ifstream f(path);
+    return Value::makeBool2(f.good());
+}
+
+// ----------------------------------------------------------------------------
+// currentDirectory() / changeDirectory(path) -- expose the process's current
+// working directory to CnR scripts. writeFile/readFile/etc. all resolve
+// relative paths against this, so a script can now check where it's about
+// to read/write instead of guessing:
+//
+//   print currentDirectory();               // e.g. "/home/ryu/project"
+//   var ok = changeDirectory("/tmp");        // returns true/false
+//
+// getcwd(nullptr, 0) (glibc/POSIX extension, also available via _getcwd on
+// Windows per the include shim above) mallocs a big-enough buffer itself,
+// so there's no fixed-size buffer to overflow on a long path.
+// ----------------------------------------------------------------------------
+Value callCurrentDirectory(const std::vector<Value>& args) {
+    (void)args;
+    char* buf = getcwd(nullptr, 0);
+    if(!buf)
+        throw std::runtime_error("currentDirectory(): could not determine current working directory");
+    std::string dir(buf);
+    std::free(buf);
+    return Value::makeString(dir);
+}
+
+Value callChangeDirectory(const std::vector<Value>& args) {
+    std::string path = requireStringArg(args, 0, "changeDirectory");
+    if(chdir(path.c_str()) != 0)
+        throw std::runtime_error("changeDirectory(): could not change to '" + path + "'");
+    return Value::makeBool2(true);
+}
+
+// ============================================================================
+// stringToChars(str) / charsToString(arr) -- runtime string<->char-code-array
+// conversion. The `var[] name = "literal";` declaration form already
+// converts a *literal* string token to a char-code array at parse time
+// (see stringToArrayValues above), but that path never runs for a runtime
+// string value (e.g. the result of readFile()) since there's no literal
+// token to inspect. These two builtins do the same byte<->code mapping but
+// at runtime, on an arbitrary Value, so a file's contents (or any other
+// runtime string) can be walked/indexed exactly like an array declared
+// from a literal.
+// ============================================================================
+Value callStringToChars(const std::vector<Value>& args) {
+    std::string s = requireStringArg(args, 0, "stringToChars");
+    Value result; result.isArray = true;
+    result.array.reserve(s.size());
+    for(unsigned char ch : s) result.array.push_back((double)ch);
+    return result;
+}
+
+Value callCharsToString(const std::vector<Value>& args) {
+    if(args.empty() || !args[0].isArray)
+        throw std::runtime_error("charsToString(): argument must be an array of char codes");
+    std::string out;
+    out.reserve(args[0].array.size());
+    for(double code : args[0].array) out.push_back((char)(int)code);
+    return Value::makeString(out);
+}
+
 Value callCallable(const std::string& name, const std::vector<ExprPtr>& argExprs) {
     std::vector<Value> argVals;
     argVals.reserve(argExprs.size());
@@ -4847,6 +5307,15 @@ Value callCallable(const std::string& name, const std::vector<ExprPtr>& argExprs
 
     if(isMathBuiltinName(name)) return callMathBuiltin(name, argVals);
     if(isMathLibBuiltinName(name)) return callMathLibBuiltin(name, argVals);
+
+    if(name == "readFile") return callReadFile(argVals);
+    if(name == "writeFile") return callWriteFile(argVals);
+    if(name == "appendFile") return callAppendFile(argVals);
+    if(name == "fileExists") return callFileExists(argVals);
+    if(name == "currentDirectory") return callCurrentDirectory(argVals);
+    if(name == "changeDirectory") return callChangeDirectory(argVals);
+    if(name == "stringToChars") return callStringToChars(argVals);
+    if(name == "charsToString") return callCharsToString(argVals);
 
     throw std::runtime_error("Undefined function or struct '" + name + "'");
 }
@@ -5842,29 +6311,61 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         auto structsCopy = structs;
         auto reg = threadRegistry;
         auto regMtx = registryMtx;
+        // See snapshotGlobalScope(): without this, each block's worker
+        // Interpreter starts with an empty scope and can't see any global
+        // (mutable or otherwise) -- including the very `mutable` state a
+        // Parallel{} block is normally used to share and mutate concurrently.
+        auto globalSnapshot = snapshotGlobalScope();
 
-        std::vector<std::thread> workers;
         auto errors = std::make_shared<std::vector<std::string>>();
         auto errMtx = std::make_shared<std::mutex>();
 
-        for(auto& block : s->blocks) {
-            workers.emplace_back([block, functionsCopy, structsCopy, reg, regMtx, errors, errMtx]() {
-                Interpreter worker(functionsCopy, structsCopy);
-                worker.threadRegistry = reg;
-                worker.registryMtx = regMtx;
-                try {
-                    Value discardedReturn;
-                    worker.executeBlock(block, discardedReturn);
-                } catch(const std::exception& e) {
-                    std::lock_guard<std::mutex> lock(*errMtx);
-                    errors->push_back(e.what());
-                } catch(...) {
-                    std::lock_guard<std::mutex> lock(*errMtx);
-                    errors->push_back("unknown error in Parallel block");
-                }
-            });
+        auto runBlock = [functionsCopy, structsCopy, reg, regMtx, globalSnapshot, errors, errMtx]
+                         (const std::shared_ptr<BlockStmt>& block) {
+            Interpreter worker(functionsCopy, structsCopy);
+            worker.threadRegistry = reg;
+            worker.registryMtx = regMtx;
+            for(auto& kv : globalSnapshot) worker.scopes.front()[kv.first] = kv.second;
+            try {
+                Value discardedReturn;
+                worker.executeBlock(block, discardedReturn);
+            } catch(const std::exception& e) {
+                std::lock_guard<std::mutex> lock(*errMtx);
+                errors->push_back(e.what());
+            } catch(...) {
+                std::lock_guard<std::mutex> lock(*errMtx);
+                errors->push_back("unknown error in Parallel block");
+            }
+        };
+
+        if(s->maxThreads <= 0) {
+            // Unbounded: original behavior, every block gets its own
+            // std::thread, all launched immediately.
+            std::vector<std::thread> workers;
+            for(auto& block : s->blocks) workers.emplace_back(runBlock, block);
+            for(auto& w : workers) w.join();
+        } else {
+            // Bounded: at most maxThreads blocks run concurrently. A simple
+            // shared work-queue index + a fixed pool of maxThreads worker
+            // threads, each pulling the next unstarted block until the queue
+            // is drained -- lets a program cap its own concurrency (e.g. to
+            // match CPU count) instead of spawning one OS thread per block
+            // regardless of how many blocks there are.
+            auto nextIdx = std::make_shared<std::atomic<size_t>>(0);
+            size_t poolSize = std::min((size_t)s->maxThreads, s->blocks.size());
+            std::vector<std::thread> pool;
+            for(size_t p = 0; p < poolSize; ++p) {
+                pool.emplace_back([&s, nextIdx, runBlock]() {
+                    while(true) {
+                        size_t i = nextIdx->fetch_add(1);
+                        if(i >= s->blocks.size()) break;
+                        runBlock(s->blocks[i]);
+                    }
+                });
+            }
+            for(auto& w : pool) w.join();
         }
-        for(auto& w : workers) w.join();
+
         if(!errors->empty())
             throw std::runtime_error("Parallel block error: " + (*errors)[0]);
         return ExecResult::Normal;
@@ -5880,11 +6381,36 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         } else {
             value = evalToValue(s->value);
         }
-        scopes.back()[s->name]=value;
+        if(s->isMutable) {
+            // Box the initial value in a SharedCell; the scope slot holds
+            // only the thin handle. Any copy of this handle (thread()/
+            // Parallel{} capture, assigning it to another var, passing it
+            // as a function argument, storing it in a struct field or
+            // array of objects) shares the same cell -- see SharedCell's
+            // comment for why that's the point.
+            scopes.back()[s->name] = Value::makeMutableCell(std::move(value));
+        } else {
+            scopes.back()[s->name] = value;
+        }
         return ExecResult::Normal;
     }
     case StmtKind::Assign: {
         auto s = static_cast<AssignStmt*>(stmt.get());
+        // Check the raw (un-dereferenced) slot first: if it's a `mutable`
+        // handle, take its cell's mutex for the whole read-RHS + write-back
+        // so a concurrent assignment from another thread can't interleave
+        // between evaluating s->value and storing it (e.g. two threads both
+        // doing `counter = counter + 1;` on the same mutable var).
+        Value& rawSlot = lookupVarRaw(s->name);
+        if(rawSlot.cex().isMutableCell) {
+            auto cell = rawSlot.ex().cell;
+            std::lock_guard<std::mutex> lock(cell->mtx);
+            if(cell->payload->isArray)
+                throw std::runtime_error("Cannot assign a number to array '" + s->name + "'");
+            Value newVal = evalToValue(s->value);
+            *cell->payload = std::move(newVal);
+            return ExecResult::Normal;
+        }
         Value& val = resolveVar(s->name);
         if(val.isArray)
             throw std::runtime_error("Cannot assign a number to array '" + s->name + "'");

@@ -68,6 +68,17 @@ public:
 
     // ---- calculus (single-variable, wrt the primary param) -----------
     ExprPtr derivative(int order = 1) const;
+    // ---- calculus (multivariable) -------------------------------------
+    // Partial derivative wrt any named variable (not just params[0]), e.g.
+    // for f(x,y) = x^2*y + y^3, partialDerivative("y") gives x^2 + 3*y^2.
+    // order > 1 repeats the same partial (d^order f / d(wrt)^order), not a
+    // mixed partial -- combine two calls for mixed partials, e.g.
+    // f.partialDerivative("x") differentiated again wrt "y" by hand via
+    // Expr::derivative() on the resulting body if a mixed partial is needed.
+    ExprPtr partialDerivative(const std::string& wrt, int order = 1) const;
+    // Gradient: partial derivative wrt each parameter, in declaration order.
+    // Requires at least one parameter.
+    std::vector<ExprPtr> gradient() const;
     // Symbolic antiderivative (throws SymbolicError if not found in closed form).
     ExprPtr integral() const;
     // Definite integral, numeric (falls back automatically; always works

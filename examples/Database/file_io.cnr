@@ -1,0 +1,29 @@
+var path = "/home/ryu/CnR/examples/Database/notes.txt";
+
+// 1. Check whether the file already exists before we touch it.
+if (fileExists(path)) {
+    print ("File already exists, it will be overwritten.");
+} else {
+    print ("File does not exist yet, it will be created.");
+}
+
+// 2. "Open" for writing: creates the file (or overwrites it) then closes it.
+writeFile(path, "First line written to the file.\n");
+
+// 3. "Open" for appending: file is opened, cursor at the end, then closed.
+appendFile(path, "Second line, appended.\n");
+appendFile(path, "Third line, appended.\n");
+
+// 4. "Open" for reading: file is opened, entire contents read in, closed.
+var contents = readFile(path);
+
+print ("----- File contents -----");
+print (contents);
+print ("--------------------------");
+
+// 5. Confirm it exists now.
+if (fileExists(path)) {
+    print ("Confirmed: " + path + " exists on disk.");
+}
+print ("Running from: " + currentDirectory()); // this will display where is the CnR executable
+

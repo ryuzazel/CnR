@@ -1,0 +1,87 @@
+// ============================================================================
+// Get the roots of a polynomial equation (roots may be complex) and
+// multiply them together.
+//
+// mathRoots(...) / mathRootsImag(...) return two parallel arrays: the real
+// and imaginary parts of each root, in the same order. To multiply complex
+// numbers given as (re, im) pairs, use:
+//   (a + bi) * (c + di) = (ac - bd) + (ad + bc)i
+// ============================================================================
+
+// Multiplies all the (re[i], im[i]) complex pairs together, i = 0..count-1.
+// Returns a 2-element array: {product_re, product_im}.
+function complexProduct(var re, var im, var count) {
+    var pRe = re[0];
+    var pIm = im[0];
+    for (var k = 1; k < count; k++) {
+        var newRe = pRe * re[k] - pIm * im[k];
+        var newIm = pRe * im[k] + pIm * re[k];
+        pRe = newRe;
+        pIm = newIm;
+    }
+    var[] out = {pRe, pIm};
+    return out;
+}
+
+function printComplex(var re, var im) {
+    if (im < 0) {
+        print(re + " - " + (-im) + "i");
+    } else {
+        print(re + " + " + im + "i");
+    }
+}
+
+
+// ----------------------------------------------------------------------
+// Example 1: x^2 + 4 = 0  ->  roots are +2i and -2i
+// ----------------------------------------------------------------------
+print("=== x^2 + 4 = 0 ===");
+
+define("f(x) = x^2 + 4");
+var f_re = mathRoots("f");
+var f_im = mathRootsImag("f");
+
+print("Roots:");
+printComplex(f_re[0], f_im[0]);
+printComplex(f_re[1], f_im[1]);
+
+var fProd = complexProduct(f_re, f_im, 2);
+print("Product of roots:");
+printComplex(fProd[0], fProd[1]);   // (2i)*(-2i) = 4  (real -- Vieta: a0/an = 4/1)
+
+
+// ----------------------------------------------------------------------
+// Example 2: x^3 - 1 = 0  ->  one real root, one complex-conjugate pair
+// ----------------------------------------------------------------------
+print("=== x^3 - 1 = 0 ===");
+
+define("g(x) = x^3 - 1");
+var g_re = mathRoots("g");
+var g_im = mathRootsImag("g");
+
+print("Roots:");
+printComplex(g_re[0], g_im[0]);
+printComplex(g_re[1], g_im[1]);
+printComplex(g_re[2], g_im[2]);
+
+var gProd = complexProduct(g_re, g_im, 3);
+print("Product of roots:");
+printComplex(gProd[0], gProd[1]);   // -> 1  (Vieta: -d/a = -(-1)/1 = 1)
+
+
+// ----------------------------------------------------------------------
+// Example 3: raw coefficients instead of a defined function --
+// x^2 - 2x + 5 = 0  ->  roots 1+2i and 1-2i
+// ----------------------------------------------------------------------
+print("=== x^2 - 2x + 5 = 0 ===");
+
+var h_re = mathRoots(1, -2, 5);
+var h_im = mathRootsImag(1, -2, 5);
+
+print("Roots:");
+printComplex(h_re[0], h_im[0]);
+printComplex(h_re[1], h_im[1]);
+
+var hProd = complexProduct(h_re, h_im, 2);
+print("Product of roots:");
+printComplex(hProd[0], hProd[1]);   // (1+2i)*(1-2i) = 1 + 4 = 5  (Vieta: 5/1)

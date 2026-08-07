@@ -131,9 +131,22 @@ const Set& Function::image() const { ensureImage(); return *m_image; }
 
 ExprPtr Function::derivative(int order) const {
     std::string p = params.empty() ? "x" : params[0];
+    return partialDerivative(p, order);
+}
+
+ExprPtr Function::partialDerivative(const std::string& wrt, int order) const {
     ExprPtr d = body;
-    for (int i = 0; i < order; ++i) d = d->derivative(p)->simplify();
+    for (int i = 0; i < order; ++i) d = d->derivative(wrt)->simplify();
     return d;
+}
+
+std::vector<ExprPtr> Function::gradient() const {
+    if (params.empty())
+        throw SymbolicError("Function::gradient() requires '" + name + "' to have at least one parameter");
+    std::vector<ExprPtr> out;
+    out.reserve(params.size());
+    for (auto& p : params) out.push_back(partialDerivative(p, 1));
+    return out;
 }
 
 ExprPtr Function::integral() const {

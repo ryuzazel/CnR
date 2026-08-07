@@ -127,8 +127,8 @@ std::vector<double> mathPolyCoeffsFromFunction(const math::Function& f) {
 
 bool isMathLibBuiltinName(const std::string& name) {
     static const std::unordered_map<std::string,int> names = {
-        {"mathDefine",0}, {"mathEval",0}, {"mathToString",0},
-        {"mathDerivative",0}, {"mathIntegral",0}, {"mathDefiniteIntegral",0},
+        {"mathDefine",0}, {"define",0}, {"mathEval",0}, {"mathToString",0},
+        {"mathDerivative",0}, {"mathGradient",0}, {"mathIntegral",0}, {"mathDefiniteIntegral",0},
         {"mathTaylorSeries",0}, {"mathDomain",0}, {"mathDomainExact",0}, {"mathImage",0},
         {"mathLimit",0}, {"mathLimitAtInfinity",0},
         {"mathSum",0}, {"mathProduct",0},
@@ -136,6 +136,7 @@ bool isMathLibBuiltinName(const std::string& name) {
         {"mathRoots",0}, {"mathRootsImag",0}, {"divisors",0},
         {"matDeterminant",0}, {"matInverse",0}, {"matRank",0}, {"matSolve",0},
         {"matEigenvalues",0}, {"matEigenvaluesImag",0}, {"matTranspose",0}, {"matMultiply",0},
+        {"complexEval",0},
     };
     return names.count(name) > 0;
 }
@@ -172,7 +173,87 @@ Value complexToCnrValue(const math::Complex& c) {
     Value v = Value::makeObject();
     (*v.ex().object)["re"] = makePlainNumber(c.real());
     (*v.ex().object)["im"] = makePlainNumber(c.imag());
+    v.ex().isComplexNumber = true; // pretty-prints as "a+bi" -- see valueToDisplayString()
     return v;
+}
+
+// ---- Complex-number expression evaluation -------------------------------
+//
+// mathlib's own Expr::eval() is real (double) only. Rather than threading a
+// second, complex-valued evaluator through the whole symbolic engine
+// (simplify/derivative/integral/domain-inference all assume real), complex
+// arithmetic is supported as a separate, self-contained evaluation mode:
+// parse the input the normal way (math::Parser::parseExpression -- the
+// grammar/tokenizer doesn't care whether the result will be read as real or
+// complex), then walk the resulting Expr tree interpreting the symbol "i"
+// as the imaginary unit instead of a free variable. This is enough to
+// cover ordinary complex arithmetic/expressions such as "2i * 5" or
+// "(5 + 20i) * (sin(pi/2)*i + cos(pi))" -- note "2i" parses for free as
+// implicit multiplication (Parser.cpp already turns "2x" into 2*x for any
+// trailing identifier, "i" included).
+math::Complex evalComplexExpr(const math::ExprPtr& e) {
+    using math::Kind;
+    using math::Complex;
+    switch(e->kind) {
+        case Kind::Number:
+            return Complex(e->value, 0.0);
+        case Kind::Symbol: {
+            if(e->name == "i") return Complex(0.0, 1.0);
+            if(e->name == "pi") return Complex(M_PI, 0.0);
+            if(e->name == "e") return Complex(M_E, 0.0);
+            throw std::runtime_error("complexEval(): free symbol '" + e->name +
+                "' is not defined -- only numbers, 'i' (imaginary unit), 'pi', and 'e' are supported");
+        }
+        case Kind::Add: {
+            Complex acc(0.0, 0.0);
+            for(auto& a : e->args) acc += evalComplexExpr(a);
+            return acc;
+        }
+        case Kind::Mul: {
+            Complex acc(1.0, 0.0);
+            for(auto& a : e->args) acc *= evalComplexExpr(a);
+            return acc;
+        }
+        case Kind::Pow: {
+            Complex base = evalComplexExpr(e->args[0]);
+            Complex exp = evalComplexExpr(e->args[1]);
+            return std::pow(base, exp);
+        }
+        case Kind::Func: {
+            std::vector<Complex> a;
+            a.reserve(e->args.size());
+            for(auto& arg : e->args) a.push_back(evalComplexExpr(arg));
+            const std::string& fn = e->name;
+            if(fn == "sin") return std::sin(a[0]);
+            if(fn == "cos") return std::cos(a[0]);
+            if(fn == "tan") return std::sin(a[0]) / std::cos(a[0]);
+            if(fn == "sinh") return std::sinh(a[0]);
+            if(fn == "cosh") return std::cosh(a[0]);
+            if(fn == "tanh") return std::tanh(a[0]);
+            if(fn == "asin") return std::asin(a[0]);
+            if(fn == "acos") return std::acos(a[0]);
+            if(fn == "atan") return std::atan(a[0]);
+            if(fn == "exp") return std::exp(a[0]);
+            if(fn == "ln") return std::log(a[0]);
+            if(fn == "log") return a.size() == 2 ? (std::log(a[1]) / std::log(a[0])) // log(base, x)
+                                                   : (std::log(a[0]) / std::log(Complex(10.0, 0.0)));
+            if(fn == "sqrt") return std::sqrt(a[0]);
+            if(fn == "abs") return Complex(std::abs(a[0]), 0.0);
+            if(fn == "floor" || fn == "ceil" || fn == "sign") {
+                if(std::fabs(a[0].imag()) > 1e-9)
+                    throw std::runtime_error("complexEval(): '" + fn + "' is only defined for real inputs");
+                double r = a[0].real();
+                if(fn == "floor") return Complex(std::floor(r), 0.0);
+                if(fn == "ceil") return Complex(std::ceil(r), 0.0);
+                return Complex((r > 0) - (r < 0), 0.0);
+            }
+            throw std::runtime_error("complexEval(): function '" + fn + "' is not supported in complex mode");
+        }
+        case Kind::Call:
+            throw std::runtime_error("complexEval(): calls to user-defined functions (via mathDefine/define) "
+                                      "are not supported in complex mode -- inline the expression instead");
+    }
+    throw std::runtime_error("complexEval(): unhandled expression kind");
 }
 
 // math::Set (domain/image) -> its toString(), as a CnR string Value.
@@ -465,7 +546,12 @@ BigDecimal evalPolynomialAntiderivativeAt(const std::vector<BigMonomial>& terms,
 }
 
 
-Value callMathLibBuiltin(const std::string& name, std::vector<Value>& args) {
+Value callMathLibBuiltin(const std::string& name0, std::vector<Value>& args) {
+    // "define" is a short alias for "mathDefine" -- same underlying handler,
+    // supports single- and multi-variable definitions alike since the
+    // parser already accepts an arbitrary parameter list, e.g.
+    // define("f(x,y) = x^2 + y^2") is exactly mathDefine("f(x,y) = ...").
+    const std::string& name = (name0 == "define") ? std::string("mathDefine") : name0;
     auto need = [&](size_t n) {
         if(args.size() != n)
             throw std::runtime_error("'" + name + "()' expects " + std::to_string(n) +
@@ -490,8 +576,20 @@ Value callMathLibBuiltin(const std::string& name, std::vector<Value>& args) {
         // mathDefiniteIntegral(): try the exact route first, only fall back
         // to mathlib's double-based evaluator (math::Function::operator())
         // when the exact route can't handle this expression.
-        need(2);
+        //
+        // mathEval("f", x, y, ...) -- multivariable: one value per
+        // parameter of f, in declaration order (matches how f was defined,
+        // e.g. mathDefine("f(x,y) = ...")). Always plain-double here; the
+        // BigDecimal-exact path below is single-variable only.
+        if(args.size() < 2)
+            throw std::runtime_error("'mathEval()' expects at least 2 argument(s), got " + std::to_string(args.size()));
         auto& f = mathLookupFunction(cnrValueToStdString(args[0], "mathEval()'s 1st argument"));
+        if(args.size() > 2) {
+            std::vector<double> xs;
+            xs.reserve(args.size() - 1);
+            for(size_t i = 1; i < args.size(); ++i) xs.push_back(valueToApproxDouble(args[i]));
+            return makePlainNumber(f.eval(xs));
+        }
         if(valueRequestsBigPrecision(args[1])) {
             int precision = std::min(valuePrecisionOrDefault(args[1]), CNR_BIGDEC_MAX_SCALE);
             std::string var = f.params.empty() ? "x" : f.params[0];
@@ -529,12 +627,36 @@ Value callMathLibBuiltin(const std::string& name, std::vector<Value>& args) {
 
     // ---- Calculus ----------------------------------------------------------
     if(name == "mathDerivative") {
-        // mathDerivative("f") or mathDerivative("f", order)
-        if(args.size() != 1 && args.size() != 2)
-            throw std::runtime_error("'mathDerivative()' expects 1 or 2 argument(s), got " + std::to_string(args.size()));
+        // mathDerivative("f")               -> d/d(params[0]) f, order 1
+        // mathDerivative("f", order)        -> d^order/d(params[0])^order f
+        // mathDerivative("f", "y")          -> partial derivative d/dy f (multivariable)
+        // mathDerivative("f", "y", order)   -> d^order/dy^order f
+        if(args.empty() || args.size() > 3)
+            throw std::runtime_error("'mathDerivative()' expects 1 to 3 argument(s), got " + std::to_string(args.size()));
         auto& f = mathLookupFunction(cnrValueToStdString(args[0], "mathDerivative()'s 1st argument"));
-        int order = args.size() == 2 ? (int)valueToApproxDouble(args[1]) : 1;
-        return Value::makeString(f.derivative(order)->toString());
+        std::string wrt = f.params.empty() ? "x" : f.params[0];
+        int order = 1;
+        if(args.size() == 2) {
+            if(args[1].isString) wrt = args[1].str;
+            else order = (int)valueToApproxDouble(args[1]);
+        } else if(args.size() == 3) {
+            wrt = cnrValueToStdString(args[1], "mathDerivative()'s 2nd argument (variable name)");
+            order = (int)valueToApproxDouble(args[2]);
+        }
+        return Value::makeString(f.partialDerivative(wrt, order)->toString());
+    }
+    if(name == "mathGradient") {
+        // mathGradient("f") -> object mapping each parameter name to the
+        // (stringified) partial derivative of f wrt that parameter, e.g.
+        // for f(x,y) = x^2*y + y^3: {x: "2*x*y", y: "x^2 + 3*y^2"}.
+        need(1);
+        auto& f = mathLookupFunction(cnrValueToStdString(args[0], "mathGradient()'s argument"));
+        if(f.params.empty())
+            throw std::runtime_error("mathGradient(): function '" + f.name + "' has no parameters");
+        Value v = Value::makeObject();
+        auto& obj = *v.ex().object;
+        for(auto& p : f.params) obj[p] = Value::makeString(f.partialDerivative(p, 1)->toString());
+        return v;
     }
     if(name == "mathIntegral") {
         need(1);
@@ -853,6 +975,21 @@ Value callMathLibBuiltin(const std::string& name, std::vector<Value>& args) {
         out.isArray = true;
         for(auto& c : vals) out.array.push_back(name == "matEigenvalues" ? c.real() : c.imag());
         return out;
+    }
+
+    // ---- Complex-number arithmetic ----------------------------------------
+    if(name == "complexEval") {
+        // complexEval("2i * 5") -> {re: 0, im: 10} (as a CnR object; if the
+        // imaginary part is negligible it comes back as a plain number, same
+        // convention as mathRoots()/matEigenvalues() -- see complexToCnrValue).
+        // "i" is the imaginary unit; "sen" is accepted as an alias for "sin"
+        // (canonicalized by the parser), so e.g.
+        //   complexEval("(5 + 20i) * (sen(pi/2)*i + cos(pi))")
+        // evaluates to -25 - 15i.
+        need(1);
+        std::string src = cnrValueToStdString(args[0], "complexEval()'s argument");
+        math::ExprPtr e = math::Parser::parseExpression(src);
+        return complexToCnrValue(evalComplexExpr(e));
     }
 
     throw std::runtime_error("Unknown built-in math-lib function '" + name + "'");

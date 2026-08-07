@@ -15,6 +15,16 @@ static const std::set<std::string>& knownFunctions() {
     return F;
 }
 
+// A small set of non-English function-name aliases, canonicalized to their
+// knownFunctions() name right here at parse time so every downstream
+// consumer (Expr::eval, Calculus.cpp's derivative()/integral(), Domain-
+// Inference.cpp) only ever sees the canonical name and needs no changes.
+// "sen" is Portuguese/Spanish for sine.
+static std::string canonicalFuncName(const std::string& id) {
+    if (id == "sen") return "sin";
+    return id;
+}
+
 Parser::Parser(std::string input) : m_in(std::move(input)) {}
 
 void Parser::skipWs() { while (!eof() && std::isspace((unsigned char)peek())) m_pos++; }
@@ -160,9 +170,10 @@ ExprPtr Parser::parsePrimary() {
                 while (matchChar(',')) callArgs.push_back(parseExpr());
                 expect(')', "to close function/call arguments");
             }
-            if (knownFunctions().count(id)) {
-                if (callArgs.size() == 1) return Expr::func(id, callArgs[0]);
-                if (callArgs.size() == 2) return Expr::func(id, callArgs[0], callArgs[1]);
+            std::string canon = canonicalFuncName(id);
+            if (knownFunctions().count(canon)) {
+                if (callArgs.size() == 1) return Expr::func(canon, callArgs[0]);
+                if (callArgs.size() == 2) return Expr::func(canon, callArgs[0], callArgs[1]);
                 throw ParseError("built-in function '" + id + "' takes 1 or 2 arguments");
             }
             return Expr::call(id, callArgs);

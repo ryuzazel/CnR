@@ -1,0 +1,28 @@
+
+var THREADS = 12;
+var ITERS_PER_THREAD = 83333;
+var expected = THREADS * ITERS_PER_THREAD;
+
+mutable var[] sharedArr = {0};
+var arrLock = mutex();
+
+function bumpFixed() {
+    var i = 0;
+    while (i < ITERS_PER_THREAD) {
+        var _l = arrLock.lock();
+        sharedArr[0] = sharedArr[0] + 1;
+        var _u = arrLock.unlock();
+        i = i + 1;
+    }
+}
+
+var[] threads;
+var t = 0;
+while (t < THREADS) {
+    threads.push(thread(bumpFixed));
+    t = t + 1;
+}
+var results = threads.joinAll();
+
+print("sharedArr[0] = " + sharedArr[0]);
+print("expected     = " + expected);

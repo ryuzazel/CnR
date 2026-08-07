@@ -3,13 +3,17 @@
   "displayName": "CnR",
   "publisher": "ryuzazel",
   "description": "Compile and Run",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "engines": {
     "vscode": "^1.80.0"
   },
   "categories": [
     "Programming Languages"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryuzazel/CnR.git"
+  },
   "contributes": {
     "languages": [{
       "id": "cnr",
