@@ -1,0 +1,1186 @@
+Sector Define{
+    var fishCount = 50;
+    var AquariumSize[] = {30,30,30};
+    var fishSpeed = 0.9;
+    var sharkSpeed = 0.9;
+    var sharkCatchRadius = 2.4;
+    var minFishSeparation = 8;
+    var fishPerceptionRadius = 16;
+    var alignmentRadius = 4;
+
+    var cohesionRadius = 9;
+    var wallAwareRadius = 7;
+    var minWallClearance = 1.9;
+    var wanderThreshold = 0.4;
+    var cruiseSpeedFactor = 0.5;
+    var panicSprintMultiplier = 1.4;
+    var flankBiasMax = 0.4;
+    var safeRadius = 16;
+    var containmentStrength = 0.55;
+
+    var[] fishDS;
+    var animationPath = "animation3D.txt";
+
+    Struct Fish{
+        var status;
+        var position[];
+        var wallDistance[];
+        var heading[];
+        var boldness;
+        var panicLevel;
+        Fish(var px, var py, var pz){
+            status = 1;
+            position.push(px);
+            position.push(py);
+            position.push(pz);
+            wallDistance.push(AquariumSize[0] - abs(px));
+            wallDistance.push(AquariumSize[1] - abs(py));
+            wallDistance.push(AquariumSize[2] - abs(pz));
+            heading.push(0);
+            heading.push(0);
+            heading.push(0);
+            boldness = random(0.7,1.3);
+            panicLevel = 0;
+        }
+    }
+
+    var[] fishEntity;
+
+    Struct Shark{
+        var position[];
+        var wallDistance[];
+        var nearbyFish;
+        var heading[];
+        Shark(var px, var py, var pz){
+            position.push(px);
+            position.push(py);
+            position.push(pz);
+            wallDistance.push(AquariumSize[0] - abs(px));
+            wallDistance.push(AquariumSize[1] - abs(py));
+            wallDistance.push(AquariumSize[2] - abs(pz));
+            heading.push(0);
+            heading.push(0);
+            heading.push(0);
+        }
+    }
+    var sharkEntity = Shark(random(AquariumSize[0] *-1, AquariumSize[0]),random(AquariumSize[1] *-1, AquariumSize[1]),random(AquariumSize[2] *-1, AquariumSize[2]));
+}
+
+
+Sector Functions{
+
+    function sign(var x){
+        if (x == 0){
+            return 1;
+        }
+        return (x / abs(x));
+    }
+
+    function calculateDistance (var pos1, var pos2){
+        return sqroot(pow((pos1[0]-pos2[0]),2)+ pow((pos1[1]-pos2[1]),2) + pow((pos1[2]-pos2[2]),2));
+    }
+
+    function calculateWallDistance(var f){
+        var px = f.position[0];
+        var py = f.position[1];
+        var pz = f.position[2];
+        f.wallDistance[0] = AquariumSize[0] - abs(px);
+        f.wallDistance[1] = AquariumSize[1] - abs(py);
+        f.wallDistance[2] = AquariumSize[2] - abs(pz);
+    }
+
+    var wallEpsilon = 0.05;
+
+    function deslocate(var f, var dx, var dy, var dz){
+        var px = f.position[0];
+        var py = f.position[1];
+        var pz = f.position[2];
+        var nextX = px + dx;
+        var nextY = py + dy;
+        var nextZ = pz + dz;
+        if (abs(nextX) >= AquariumSize[0]){
+            f.position[0] = (AquariumSize[0] - wallEpsilon) * sign(nextX);
+        } else{
+            f.position[0] = nextX;
+        }
+        if(abs(nextY) >= AquariumSize[1]){
+            f.position[1] = (AquariumSize[1] - wallEpsilon) * sign(nextY);
+        } else {
+            f.position[1] = nextY;
+        }
+        if(abs(nextZ) >= AquariumSize[2]){
+            f.position[2] = (AquariumSize[2] - wallEpsilon) * sign(nextZ);
+        } else {
+            f.position[2] = nextZ;
+        }
+        calculateWallDistance(f);
+    }
+
+    function deslocateFish(var f, var dx, var dy, var dz){
+        var beforeX = f.position[0];
+        var beforeY = f.position[1];
+        var beforeZ = f.position[2];
+        deslocate(f, dx, dy, dz);
+        var limitX = AquariumSize[0] - minWallClearance;
+        var limitY = AquariumSize[1] - minWallClearance;
+        var limitZ = AquariumSize[2] - minWallClearance;
+        if (abs(f.position[0]) > limitX){
+            f.position[0] = limitX * sign(f.position[0]);
+        }
+        if (abs(f.position[1]) > limitY){
+            f.position[1] = limitY * sign(f.position[1]);
+        }
+        if (abs(f.position[2]) > limitZ){
+            f.position[2] = limitZ * sign(f.position[2]);
+        }
+        calculateWallDistance(f);
+        var actual[] = {f.position[0] - beforeX, f.position[1] - beforeY, f.position[2] - beforeZ};
+        return actual;
+    }
+
+    function spawnFish(){
+        for(var i = 0; i<fishCount; i++){
+            var tempPos[] = {random((AquariumSize[0]-minWallClearance) *-1, AquariumSize[0]-minWallClearance),random((AquariumSize[1]-minWallClearance)*-1, AquariumSize[1]-minWallClearance),random((AquariumSize[2]-minWallClearance)*-1, AquariumSize[2]-minWallClearance)};
+            fishEntity.push(Fish(tempPos[0], tempPos[1], tempPos[2]));
+            fishDS.push(calculateDistance(sharkEntity.position, tempPos));
+        }
+    }
+
+    function sharkDistanceMeter(){
+        for(var i = 0; i<fishCount; i++){
+            if (fishEntity[i].status == 0){
+                fishDS[i] = 999999;
+            } else {
+                fishDS[i] = calculateDistance(sharkEntity.position, fishEntity[i].position);
+            }
+        }
+    }
+
+    function findNearbyFish(){
+        var minIndex = -1;
+        var minDist = 999999;
+        for(var i = 0; i<fishCount; i++){
+            if (fishEntity[i].status == 1 && fishDS[i] < minDist){
+                minDist = fishDS[i];
+                minIndex = i;
+            }
+        }
+        return minIndex;
+    }
+
+    var visionCosThreshold = -0.7071;
+
+    function inVisionCone(var headingX, var headingY, var headingZ, var dx, var dy, var dz){
+        var hMag = sqroot(pow(headingX,2) + pow(headingY,2) + pow(headingZ,2));
+        if (hMag < 0.0001){
+            return 1;
+        }
+        var dMag = sqroot(pow(dx,2) + pow(dy,2) + pow(dz,2));
+        if (dMag < 0.0001){
+            return 1;
+        }
+        var dot = (headingX/hMag) * (dx/dMag) + (headingY/hMag) * (dy/dMag) + (headingZ/hMag) * (dz/dMag);
+        if (dot > visionCosThreshold){
+            return 1;
+        }
+        return 0;
+    }
+
+    function fishSensitivity(var boldness){
+        return 2 - boldness;
+    }
+
+    function findNearestFish(var selfIndex){
+        var minIndex = -1;
+        var minDist = 999999;
+        var self = fishEntity[selfIndex];
+        var selfPos = self.position;
+        var hX = self.heading[0];
+        var hY = self.heading[1];
+        var hZ = self.heading[2];
+        for(var i = 0; i<fishCount; i++){
+            if (i != selfIndex && fishEntity[i].status == 1){
+                var ox = fishEntity[i].position[0] - selfPos[0];
+                var oy = fishEntity[i].position[1] - selfPos[1];
+                var oz = fishEntity[i].position[2] - selfPos[2];
+                if (inVisionCone(hX, hY, hZ, ox, oy, oz) == 1){
+                    var d = sqroot(pow(ox,2) + pow(oy,2) + pow(oz,2));
+                    if (d < minDist){
+                        minDist = d;
+                        minIndex = i;
+                    }
+                }
+            }
+        }
+        return minIndex;
+    }
+
+    function averageNeighborHeading(var selfIndex){
+        var self = fishEntity[selfIndex];
+        var selfPos = self.position;
+        var hX = self.heading[0];
+        var hY = self.heading[1];
+        var hZ = self.heading[2];
+        var sumX = 0;
+        var sumY = 0;
+        var sumZ = 0;
+        var count = 0;
+        for(var i = 0; i<fishCount; i++){
+            if (i != selfIndex && fishEntity[i].status == 1){
+                var ox = fishEntity[i].position[0] - selfPos[0];
+                var oy = fishEntity[i].position[1] - selfPos[1];
+                var oz = fishEntity[i].position[2] - selfPos[2];
+                var d = sqroot(pow(ox,2) + pow(oy,2) + pow(oz,2));
+                if (d < alignmentRadius && inVisionCone(hX, hY, hZ, ox, oy, oz) == 1){
+                    sumX = sumX + fishEntity[i].heading[0];
+                    sumY = sumY + fishEntity[i].heading[1];
+                    sumZ = sumZ + fishEntity[i].heading[2];
+                    count = count + 1;
+                }
+            }
+        }
+        var result[] = {0,0,0};
+        if (count == 0){
+            return result;
+        }
+        var avgX = sumX / count;
+        var avgY = sumY / count;
+        var avgZ = sumZ / count;
+        var mag = sqroot(pow(avgX,2) + pow(avgY,2) + pow(avgZ,2));
+        if (mag < 0.0001){
+            return result;
+        }
+        result[0] = avgX / mag;
+        result[1] = avgY / mag;
+        result[2] = avgZ / mag;
+        return result;
+    }
+
+    function schoolCenterDirection(var selfIndex){
+        var self = fishEntity[selfIndex];
+        var selfPos = self.position;
+        var hX = self.heading[0];
+        var hY = self.heading[1];
+        var hZ = self.heading[2];
+        var sumX = 0;
+        var sumY = 0;
+        var sumZ = 0;
+        var count = 0;
+        for(var i = 0; i<fishCount; i++){
+            if (i != selfIndex && fishEntity[i].status == 1){
+                var ox = fishEntity[i].position[0] - selfPos[0];
+                var oy = fishEntity[i].position[1] - selfPos[1];
+                var oz = fishEntity[i].position[2] - selfPos[2];
+                var d = sqroot(pow(ox,2) + pow(oy,2) + pow(oz,2));
+                if (d > minFishSeparation && d < cohesionRadius && inVisionCone(hX, hY, hZ, ox, oy, oz) == 1){
+                    sumX = sumX + fishEntity[i].position[0];
+                    sumY = sumY + fishEntity[i].position[1];
+                    sumZ = sumZ + fishEntity[i].position[2];
+                    count = count + 1;
+                }
+            }
+        }
+        var result[] = {0,0,0};
+        if (count == 0){
+            return result;
+        }
+        var centerX = sumX / count;
+        var centerY = sumY / count;
+        var centerZ = sumZ / count;
+        var dx = centerX - selfPos[0];
+        var dy = centerY - selfPos[1];
+        var dz = centerZ - selfPos[2];
+        var mag = sqroot(pow(dx,2) + pow(dy,2) + pow(dz,2));
+        if (mag < 0.0001){
+            return result;
+        }
+        result[0] = dx / mag;
+        result[1] = dy / mag;
+        result[2] = dz / mag;
+        return result;
+    }
+
+    function updatePanicLevels(){
+        sharkDistanceMeter();
+        var[] newPanic;
+        for(var i = 0; i<fishCount; i++){
+            newPanic.push(fishEntity[i].panicLevel);
+        }
+        for(var i = 0; i<fishCount; i++){
+            var self = fishEntity[i];
+            if (self.status == 0){
+                newPanic[i] = 0;
+            } else {
+                var sensitivity = fishSensitivity(self.boldness);
+                var perceivedDist = fishDS[i] * sensitivity;
+                var ownUrgency = 0;
+                if (perceivedDist < fishPerceptionRadius){
+                    ownUrgency = 1;
+                    if (perceivedDist > 3){
+                        ownUrgency = 3 / perceivedDist;
+                    }
+                }
+
+                var hX = self.heading[0];
+                var hY = self.heading[1];
+                var hZ = self.heading[2];
+                var selfPos = self.position;
+                var neighborSum = 0;
+                var neighborCount = 0;
+                for(var j = 0; j<fishCount; j++){
+                    if (j != i && fishEntity[j].status == 1){
+                        var ox = fishEntity[j].position[0] - selfPos[0];
+                        var oy = fishEntity[j].position[1] - selfPos[1];
+                        var oz = fishEntity[j].position[2] - selfPos[2];
+                        var d = sqroot(pow(ox,2) + pow(oy,2) + pow(oz,2));
+                        if (d < alignmentRadius && inVisionCone(hX, hY, hZ, ox, oy, oz) == 1){
+                            neighborSum = neighborSum + fishEntity[j].panicLevel;
+                            neighborCount = neighborCount + 1;
+                        }
+                    }
+                }
+                var neighborPanic = 0;
+                if (neighborCount > 0){
+                    neighborPanic = neighborSum / neighborCount;
+                }
+
+                var target = ownUrgency;
+                if (neighborPanic * 0.8 > target){
+                    target = neighborPanic * 0.8;
+                }
+
+                var current = self.panicLevel;
+                if (target > current){
+                    newPanic[i] = current + (target - current) * 0.6;
+                } else {
+                    newPanic[i] = current + (target - current) * 0.15;
+                }
+            }
+        }
+        for(var i = 0; i<fishCount; i++){
+            var toUpdate = fishEntity[i];
+            toUpdate.panicLevel = newPanic[i];
+        }
+    }
+
+    function stepToward(var s, var targetPos){
+        var dx = targetPos[0] - s.position[0];
+        var dy = targetPos[1] - s.position[1];
+        var dz = targetPos[2] - s.position[2];
+        var budget = abs(dx) + abs(dy) + abs(dz);
+        var stepX = dx * (sharkSpeed / budget);
+        var stepY = dy * (sharkSpeed / budget);
+        var stepZ = dz * (sharkSpeed / budget);
+        deslocate(s, stepX, stepY, stepZ);
+        var stepMag = abs(stepX) + abs(stepY) + abs(stepZ);
+        if (stepMag > 0.0001){
+            s.heading[0] = stepX / stepMag;
+            s.heading[1] = stepY / stepMag;
+            s.heading[2] = stepZ / stepMag;
+        }
+    }
+
+    function chaseFish(){
+        sharkDistanceMeter();
+        sharkEntity.nearbyFish = findNearbyFish();
+
+        if (sharkEntity.nearbyFish == -1){
+            return;
+        }
+
+        var target = fishEntity[sharkEntity.nearbyFish];
+        var dx = target.position[0] - sharkEntity.position[0];
+        var dy = target.position[1] - sharkEntity.position[1];
+        var dz = target.position[2] - sharkEntity.position[2];
+        var dist = abs(dx) + abs(dy) + abs(dz);
+
+        if (dist <= sharkCatchRadius){
+            target.status = 0;
+            target.position[0] = AquariumSize[0] * 100;
+            target.position[1] = AquariumSize[1] * 100;
+            target.position[2] = AquariumSize[2] * 100;
+            return;
+        }
+
+        if (dist < sharkSpeed){
+            var closeStepX = dx * ((dist - sharkCatchRadius * 0.5) / dist);
+            var closeStepY = dy * ((dist - sharkCatchRadius * 0.5) / dist);
+            var closeStepZ = dz * ((dist - sharkCatchRadius * 0.5) / dist);
+            deslocate(sharkEntity, closeStepX, closeStepY, closeStepZ);
+            var closeStepMag = abs(closeStepX) + abs(closeStepY) + abs(closeStepZ);
+            if (closeStepMag > 0.0001){
+                sharkEntity.heading[0] = closeStepX / closeStepMag;
+                sharkEntity.heading[1] = closeStepY / closeStepMag;
+                sharkEntity.heading[2] = closeStepZ / closeStepMag;
+            }
+            return;
+        }
+
+        stepToward(sharkEntity, target.position);
+    }
+
+    function aliveFishCount(){
+        var count = 0;
+        for(var i = 0; i<fishCount; i++){
+            if (fishEntity[i].status == 1){
+                count = count + 1;
+            }
+        }
+        return count;
+    }
+
+    function deadFishCount(){
+        var count = 0;
+        for(var i = 0; i<fishCount; i++){
+            if (fishEntity[i].status == 0){
+                count = count + 1;
+            }
+        }
+        return count;
+    }
+
+    function logTick(var tick){
+        var line = "$tick" + tick + ": sharkX = " + sharkEntity.position[0] + "; sharkY = " + sharkEntity.position[1] + "; sharkZ = " + sharkEntity.position[2] + "; ";
+        for(var i = 0; i<fishCount; i++){
+            if (fishEntity[i].status == 1){
+                line = line + "fish" + i + "X = " + fishEntity[i].position[0] + "; fish" + i + "Y = " + fishEntity[i].position[1] + "; fish" + i + "Z = " + fishEntity[i].position[2] + "; ";
+            }
+        }
+        appendFile(animationPath, line + "\n");
+    }
+}
+
+Sector Brain{
+    var brainInputSize = 18;
+    var brainHidden = 16;
+    var brainOutputSize = 3;
+    var brainLR = 0.25;
+    var brainEpochs = 35000;
+
+    var[][] bW1 = {
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+    };
+    var[] bB1 = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    var[][] bW2 = {
+        {0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},
+        {0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0}
+    };
+    var[] bB2 = {0,0,0};
+
+    var[] bHidden = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    var[] bOutput = {0,0,0};
+}
+
+Sector BrainFunctions{
+
+    function bSigmoid(var x){
+        return 1 / (1 + exp(0 - x));
+    }
+
+    function bSigmoidDerivative(var s){
+        return s * (1 - s);
+    }
+
+    function bInitWeights(){
+        for(var i = 0; i<brainInputSize; i++){
+            for(var j = 0; j<brainHidden; j++){
+                bW1[i][j] = random(-1,1);
+            }
+        }
+        for(var j = 0; j<brainHidden; j++){
+            bB1[j] = random(-1,1);
+        }
+        for(var j = 0; j<brainHidden; j++){
+            for(var k = 0; k<brainOutputSize; k++){
+                bW2[j][k] = random(-1,1);
+            }
+        }
+        for(var k = 0; k<brainOutputSize; k++){
+            bB2[k] = random(-1,1);
+        }
+    }
+
+    function bForward(var i0, var i1, var i2, var i3, var i4, var i5, var i6, var i7, var i8, var i9, var i10, var i11, var i12, var i13, var i14, var i15, var i16, var i17){
+        var inputs[] = {i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15, i16, i17};
+        for(var j = 0; j<brainHidden; j++){
+            var z = bB1[j];
+            for(var i = 0; i<brainInputSize; i++){
+                z = z + inputs[i] * bW1[i][j];
+            }
+            bHidden[j] = bSigmoid(z);
+        }
+        for(var k = 0; k<brainOutputSize; k++){
+            var z2 = bB2[k];
+            for(var j = 0; j<brainHidden; j++){
+                z2 = z2 + bHidden[j] * bW2[j][k];
+            }
+            bOutput[k] = bSigmoid(z2);
+        }
+    }
+
+    function bBackward(var i0, var i1, var i2, var i3, var i4, var i5, var i6, var i7, var i8, var i9, var i10, var i11, var i12, var i13, var i14, var i15, var i16, var i17, var t0, var t1, var t2){
+        var inputs[] = {i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15, i16, i17};
+        var targets[] = {t0, t1, t2};
+
+        var outputDelta[] = {0,0,0};
+        for(var k = 0; k<brainOutputSize; k++){
+            var errorK = bOutput[k] - targets[k];
+            outputDelta[k] = errorK * bSigmoidDerivative(bOutput[k]);
+        }
+
+        var hiddenDelta[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+        for(var j = 0; j<brainHidden; j++){
+            var sum = 0;
+            for(var k = 0; k<brainOutputSize; k++){
+                sum = sum + outputDelta[k] * bW2[j][k];
+            }
+            hiddenDelta[j] = sum * bSigmoidDerivative(bHidden[j]);
+        }
+
+        for(var j = 0; j<brainHidden; j++){
+            for(var k = 0; k<brainOutputSize; k++){
+                bW2[j][k] = bW2[j][k] - brainLR * outputDelta[k] * bHidden[j];
+            }
+        }
+        for(var k = 0; k<brainOutputSize; k++){
+            bB2[k] = bB2[k] - brainLR * outputDelta[k];
+        }
+
+        for(var i = 0; i<brainInputSize; i++){
+            for(var j = 0; j<brainHidden; j++){
+                bW1[i][j] = bW1[i][j] - brainLR * hiddenDelta[j] * inputs[i];
+            }
+        }
+        for(var j = 0; j<brainHidden; j++){
+            bB1[j] = bB1[j] - brainLR * hiddenDelta[j];
+        }
+    }
+
+    function bMakeExample(var dx, var dy, var dz, var wallDx, var wallDy, var wallDz, var minWall, var nfDx, var nfDy, var nfDz, var nfDist, var nfSharkDist, var alignX, var alignY, var alignZ, var cohX, var cohY, var cohZ){
+        var dist = sqroot(pow(dx,2) + pow(dy,2) + pow(dz,2));
+        if (dist == 0){
+            dist = 0.0001;
+        }
+        var fleeX = (dx / dist) * -1;
+        var fleeY = (dy / dist) * -1;
+        var fleeZ = (dz / dist) * -1;
+
+        var ownThreat = 1;
+        if (dist > 6){
+            ownThreat = 6 / dist;
+        }
+
+        var borrowedThreat = 0;
+        if (nfSharkDist < 6){
+            borrowedThreat = (6 - nfSharkDist) / 6;
+        }
+
+        var awayFromMateX = 0;
+        var awayFromMateY = 0;
+        var awayFromMateZ = 0;
+        if (borrowedThreat > ownThreat && nfDist > 0){
+            awayFromMateX = nfDx / nfDist;
+            awayFromMateY = nfDy / nfDist;
+            awayFromMateZ = nfDz / nfDist;
+        }
+
+        var threat = ownThreat;
+        if (borrowedThreat > threat){
+            threat = borrowedThreat;
+        }
+
+        var wallW = 0;
+        if (minWall < wallAwareRadius){
+            var wallRatio = (wallAwareRadius - minWall) / wallAwareRadius;
+            wallW = sqroot(wallRatio);
+        }
+
+        var wallNormalX = wallDx;
+        var wallNormalY = wallDy;
+        var wallNormalZ = wallDz;
+        var wnMag = sqroot(pow(wallNormalX,2) + pow(wallNormalY,2) + pow(wallNormalZ,2));
+
+        var sepX = 0;
+        var sepY = 0;
+        var sepZ = 0;
+        var sepW = 0;
+        if (nfDist > 0 && nfDist < minFishSeparation){
+            var sepMag = sqroot(pow(nfDx,2) + pow(nfDy,2) + pow(nfDz,2));
+            if (sepMag == 0){
+                sepMag = 0.0001;
+            }
+            sepX = nfDx / sepMag;
+            sepY = nfDy / sepMag;
+            sepZ = nfDz / sepMag;
+            sepW = (minFishSeparation - nfDist) / minFishSeparation;
+        }
+
+        var ownShare = 0.5;
+        if (threat > 0){
+            ownShare = ownThreat / (ownThreat + borrowedThreat + 0.0001);
+        }
+        var borrowedShare = 1 - ownShare;
+
+        var blendedFleeX = fleeX * ownShare + awayFromMateX * borrowedShare;
+        var blendedFleeY = fleeY * ownShare + awayFromMateY * borrowedShare;
+        var blendedFleeZ = fleeZ * ownShare + awayFromMateZ * borrowedShare;
+
+        var fleeDotNormal = 0;
+        if (wnMag > 0.0001){
+            fleeDotNormal = (blendedFleeX * wallNormalX + blendedFleeY * wallNormalY + blendedFleeZ * wallNormalZ) / wnMag;
+        }
+
+        var corneringX = blendedFleeX;
+        var corneringY = blendedFleeY;
+        var corneringZ = blendedFleeZ;
+        if (wallW > 0 && fleeDotNormal < 0 && wnMag > 0.0001){
+            var unitNX = wallNormalX / wnMag;
+            var unitNY = wallNormalY / wnMag;
+            var unitNZ = wallNormalZ / wnMag;
+            var dotN = blendedFleeX * unitNX + blendedFleeY * unitNY + blendedFleeZ * unitNZ;
+            var tangentX = blendedFleeX - dotN * unitNX;
+            var tangentY = blendedFleeY - dotN * unitNY;
+            var tangentZ = blendedFleeZ - dotN * unitNZ;
+            var tMag = sqroot(pow(tangentX,2) + pow(tangentY,2) + pow(tangentZ,2));
+            if (tMag > 0.0001){
+                tangentX = tangentX / tMag;
+                tangentY = tangentY / tMag;
+                tangentZ = tangentZ / tMag;
+
+                var cornerPressure = wallW * abs(fleeDotNormal);
+                if (cornerPressure > 1){
+                    cornerPressure = 1;
+                }
+
+                corneringX = blendedFleeX * (1 - cornerPressure) + tangentX * cornerPressure;
+                corneringY = blendedFleeY * (1 - cornerPressure) + tangentY * cornerPressure;
+                corneringZ = blendedFleeZ * (1 - cornerPressure) + tangentZ * cornerPressure;
+
+                var cMag = sqroot(pow(corneringX,2) + pow(corneringY,2) + pow(corneringZ,2));
+                if (cMag < 0.0001){
+                    cMag = 0.0001;
+                }
+                corneringX = corneringX / cMag;
+                corneringY = corneringY / cMag;
+                corneringZ = corneringZ / cMag;
+            }
+        }
+        blendedFleeX = corneringX;
+        blendedFleeY = corneringY;
+        blendedFleeZ = corneringZ;
+
+        var alignW = 0.35 * (1 - wallW) * (1 - sepW) * (1 - threat);
+        var cohW = 0.5 * (1 + wallW * 0.6) * (1 - sepW) * (1 - threat * 0.6);
+
+        var fleeW = threat * (1 - sepW);
+        var combinedX = blendedFleeX * fleeW + wallDx * wallW * (1 - sepW) * (1 - threat) + sepX * sepW + alignX * alignW + cohX * cohW;
+        var combinedY = blendedFleeY * fleeW + wallDy * wallW * (1 - sepW) * (1 - threat) + sepY * sepW + alignY * alignW + cohY * cohW;
+        var combinedZ = blendedFleeZ * fleeW + wallDz * wallW * (1 - sepW) * (1 - threat) + sepZ * sepW + alignZ * alignW + cohZ * cohW;
+
+        var mag = sqroot(pow(combinedX,2) + pow(combinedY,2) + pow(combinedZ,2));
+        if (mag == 0){
+            mag = 0.0001;
+        }
+        combinedX = combinedX / mag;
+        combinedY = combinedY / mag;
+        combinedZ = combinedZ / mag;
+
+        var t0 = 0.5 + (combinedX * 0.5);
+        var t1 = 0.5 + (combinedY * 0.5);
+        var t2 = 0.5 + (combinedZ * 0.5);
+        var result[] = {t0, t1, t2};
+        return result;
+    }
+
+    function bTrain(){
+        bInitWeights();
+        for(var epoch = 0; epoch<brainEpochs; epoch++){
+            var dx = random(-15,15);
+            var dy = random(-15,15);
+            var dz = random(-15,15);
+
+            var perceptionRoll = random(0,4);
+            if (perceptionRoll < 1){
+                dx = 0;
+                dy = 0;
+                dz = 0;
+            }
+            var dist = sqroot(pow(dx,2) + pow(dy,2) + pow(dz,2));
+            if (dist > fishPerceptionRadius){
+                dx = 0;
+                dy = 0;
+                dz = 0;
+                dist = 999999;
+            }
+
+            var wallDistX = random(-20,20);
+            var wallDistY = random(-30,30);
+            var wallDistZ = random(-20,20);
+            var cornerRoll = random(0,5);
+            if (cornerRoll < 1){
+                wallDistX = random(-1,1) * random(0,3);
+            } else {
+                if (cornerRoll < 2){
+                    wallDistY = random(-1,1) * random(0,3);
+                } else {
+                    if (cornerRoll < 3){
+                        wallDistZ = random(-1,1) * random(0,3);
+                    } else {
+                        if (cornerRoll < 4){
+                            wallDistX = random(-1,1) * random(0,3);
+                            wallDistY = random(-1,1) * random(0,3);
+                            wallDistZ = random(-1,1) * random(0,3);
+                        }
+                    }
+                }
+            }
+            var minWall = abs(wallDistX);
+            if (abs(wallDistY) < minWall){
+                minWall = abs(wallDistY);
+            }
+            if (abs(wallDistZ) < minWall){
+                minWall = abs(wallDistZ);
+            }
+
+            var wallDx = sign(wallDistX) * -1;
+            var wallDy = sign(wallDistY) * -1;
+            var wallDz = sign(wallDistZ) * -1;
+
+            if (cornerRoll < 4){
+                var pinRoll = random(0,2);
+                if (pinRoll >= 1){
+                    dx = wallDx * random(1,6);
+                    dy = wallDy * random(1,6);
+                    dz = wallDz * random(1,6);
+                    dist = sqroot(pow(dx,2) + pow(dy,2) + pow(dz,2));
+                }
+            }
+
+            var densityRoll = random(0,3);
+            var nfDx = random(-6,6);
+            var nfDy = random(-6,6);
+            var nfDz = random(-6,6);
+            if (densityRoll < 1){
+                nfDx = random(-1,1) * minFishSeparation;
+                nfDy = random(-1,1) * minFishSeparation;
+                nfDz = random(-1,1) * minFishSeparation;
+            }
+            var nfDist = sqroot(pow(nfDx,2) + pow(nfDy,2) + pow(nfDz,2));
+            var nfSharkDist = random(0,20);
+
+            var alignX = 0;
+            var alignY = 0;
+            var alignZ = 0;
+            var alignRoll = random(0,4);
+            if (alignRoll >= 1){
+                var rawAX = random(-1,1);
+                var rawAY = random(-1,1);
+                var rawAZ = random(-1,1);
+                var rawAMag = sqroot(pow(rawAX,2) + pow(rawAY,2) + pow(rawAZ,2));
+                if (rawAMag > 0.0001){
+                    alignX = rawAX / rawAMag;
+                    alignY = rawAY / rawAMag;
+                    alignZ = rawAZ / rawAMag;
+                }
+            }
+
+            var cohX = 0;
+            var cohY = 0;
+            var cohZ = 0;
+            var cohRoll = random(0,4);
+            if (cohRoll >= 1){
+                var rawCX = random(-1,1);
+                var rawCY = random(-1,1);
+                var rawCZ = random(-1,1);
+                var rawCMag = sqroot(pow(rawCX,2) + pow(rawCY,2) + pow(rawCZ,2));
+                if (rawCMag > 0.0001){
+                    cohX = rawCX / rawCMag;
+                    cohY = rawCY / rawCMag;
+                    cohZ = rawCZ / rawCMag;
+                }
+            }
+
+            var target = bMakeExample(dx, dy, dz, wallDx, wallDy, wallDz, minWall, nfDx, nfDy, nfDz, nfDist, nfSharkDist, alignX, alignY, alignZ, cohX, cohY, cohZ);
+            bForward(dx, dy, dz, dist, wallDistX, wallDistY, wallDistZ, minWall, nfDx, nfDy, nfDz, nfSharkDist, alignX, alignY, alignZ, cohX, cohY, cohZ);
+            bBackward(dx, dy, dz, dist, wallDistX, wallDistY, wallDistZ, minWall, nfDx, nfDy, nfDz, nfSharkDist, alignX, alignY, alignZ, cohX, cohY, cohZ, target[0], target[1], target[2]);
+        }
+    }
+
+    function bWeightsPath(){
+        return "brain_weights3D.txt";
+    }
+
+    function bSaveWeights(){
+        var out = "";
+        for(var i = 0; i<brainInputSize; i++){
+            for(var j = 0; j<brainHidden; j++){
+                out = out + bW1[i][j] + "\n";
+            }
+        }
+        for(var j = 0; j<brainHidden; j++){
+            out = out + bB1[j] + "\n";
+        }
+        for(var j = 0; j<brainHidden; j++){
+            for(var k = 0; k<brainOutputSize; k++){
+                out = out + bW2[j][k] + "\n";
+            }
+        }
+        for(var k = 0; k<brainOutputSize; k++){
+            out = out + bB2[k] + "\n";
+        }
+        writeFile(bWeightsPath(), out);
+        print("Saved brain weights to " + bWeightsPath());
+    }
+
+    function bParseNumber(var codes, var startIdx, var endIdx){
+        var[] slice;
+        var i = startIdx;
+        while(i < endIdx){
+            slice.push(codes[i]);
+            i = i + 1;
+        }
+        var s = charsToString(slice);
+        return (Float)s;
+    }
+
+    function bParseLines(var text){
+        var codes = stringToChars(text);
+        var[] values;
+        var lineStart = 0;
+        var i = 0;
+        while(i < len(codes)){
+            if (codes[i] == 10){
+                if (i > lineStart){
+                    values.push(bParseNumber(codes, lineStart, i));
+                }
+                lineStart = i + 1;
+            }
+            i = i + 1;
+        }
+        if (i > lineStart){
+            values.push(bParseNumber(codes, lineStart, i));
+        }
+        return values;
+    }
+
+    function bLoadWeights(){
+        var text = readFile(bWeightsPath());
+        var values = bParseLines(text);
+        var idx = 0;
+
+        for(var i = 0; i<brainInputSize; i++){
+            for(var j = 0; j<brainHidden; j++){
+                bW1[i][j] = values[idx];
+                idx = idx + 1;
+            }
+        }
+        for(var j = 0; j<brainHidden; j++){
+            bB1[j] = values[idx];
+            idx = idx + 1;
+        }
+        for(var j = 0; j<brainHidden; j++){
+            for(var k = 0; k<brainOutputSize; k++){
+                bW2[j][k] = values[idx];
+                idx = idx + 1;
+            }
+        }
+        for(var k = 0; k<brainOutputSize; k++){
+            bB2[k] = values[idx];
+            idx = idx + 1;
+        }
+        print("Loaded brain weights from " + bWeightsPath());
+    }
+
+    function fishBrainStep(var f, var selfIndex){
+        if (f.status == 0){
+            return;
+        }
+
+        var sensitivity = fishSensitivity(f.boldness);
+        var dx = sharkEntity.position[0] - f.position[0];
+        var dy = sharkEntity.position[1] - f.position[1];
+        var dz = sharkEntity.position[2] - f.position[2];
+        var dist = sqroot(pow(dx,2) + pow(dy,2) + pow(dz,2));
+        var perceivedDist = dist * sensitivity;
+        var sharkPerceived = 1;
+        if (perceivedDist > fishPerceptionRadius){
+            dx = 0;
+            dy = 0;
+            dz = 0;
+            perceivedDist = 999999;
+            sharkPerceived = 0;
+        }
+
+        var px = f.position[0];
+        var py = f.position[1];
+        var pz = f.position[2];
+        var wallDistX = AquariumSize[0] - abs(px);
+        if (px < 0){
+            wallDistX = wallDistX * -1;
+        }
+        var wallDistY = AquariumSize[1] - abs(py);
+        if (py < 0){
+            wallDistY = wallDistY * -1;
+        }
+        var wallDistZ = AquariumSize[2] - abs(pz);
+        if (pz < 0){
+            wallDistZ = wallDistZ * -1;
+        }
+
+        var minWall = f.wallDistance[0];
+        if (f.wallDistance[1] < minWall){
+            minWall = f.wallDistance[1];
+        }
+        if (f.wallDistance[2] < minWall){
+            minWall = f.wallDistance[2];
+        }
+
+        var nfIndex = findNearestFish(selfIndex);
+        var nfDx = 0;
+        var nfDy = 0;
+        var nfDz = 0;
+        var nfSharkDist = 999999;
+        if (nfIndex != -1){
+            var nfPos = fishEntity[nfIndex].position;
+            nfDx = f.position[0] - nfPos[0];
+            nfDy = f.position[1] - nfPos[1];
+            nfDz = f.position[2] - nfPos[2];
+            nfSharkDist = calculateDistance(nfPos, sharkEntity.position);
+        }
+
+        var align = averageNeighborHeading(selfIndex);
+        var coh = schoolCenterDirection(selfIndex);
+
+        bForward(dx, dy, dz, perceivedDist, wallDistX, wallDistY, wallDistZ, minWall, nfDx, nfDy, nfDz, nfSharkDist, align[0], align[1], align[2], coh[0], coh[1], coh[2]);
+
+        var moveX = (bOutput[0] - 0.5) * 2;
+        var moveY = (bOutput[1] - 0.5) * 2;
+        var moveZ = (bOutput[2] - 0.5) * 2;
+
+        if (minWall < wallAwareRadius){
+            var wallFleeUrgency = (wallAwareRadius - minWall) / wallAwareRadius;
+            if (wallFleeUrgency > 1){
+                wallFleeUrgency = 1;
+            }
+            wallFleeUrgency = pow(wallFleeUrgency, 0.35);
+
+            var closeX = wallAwareRadius - abs(wallDistX);
+            if (closeX < 0){
+                closeX = 0;
+            }
+            var closeY = wallAwareRadius - abs(wallDistY);
+            if (closeY < 0){
+                closeY = 0;
+            }
+            var closeZ = wallAwareRadius - abs(wallDistZ);
+            if (closeZ < 0){
+                closeZ = 0;
+            }
+            var wallFleeX = sign(wallDistX) * -1 * closeX;
+            var wallFleeY = sign(wallDistY) * -1 * closeY;
+            var wallFleeZ = sign(wallDistZ) * -1 * closeZ;
+            var wallFleeMag = sqroot(pow(wallFleeX,2) + pow(wallFleeY,2) + pow(wallFleeZ,2));
+            if (wallFleeMag > 0.0001){
+                wallFleeX = wallFleeX / wallFleeMag;
+                wallFleeY = wallFleeY / wallFleeMag;
+                wallFleeZ = wallFleeZ / wallFleeMag;
+                moveX = moveX * (1 - wallFleeUrgency) + wallFleeX * wallFleeUrgency;
+                moveY = moveY * (1 - wallFleeUrgency) + wallFleeY * wallFleeUrgency;
+                moveZ = moveZ * (1 - wallFleeUrgency) + wallFleeZ * wallFleeUrgency;
+            }
+        }
+
+        var urgency = f.panicLevel;
+        if (urgency > 1){
+            urgency = 1;
+        }
+        var effectiveSpeed = fishSpeed * (1 + urgency * panicSprintMultiplier);
+
+        var calmness = pow(1 - urgency, 2);
+        var towardCenterX = f.position[0] * -1;
+        var towardCenterY = f.position[1] * -1;
+        var towardCenterZ = f.position[2] * -1;
+        var distFromCenter = sqroot(pow(f.position[0],2) + pow(f.position[1],2) + pow(f.position[2],2));
+        var toCenterMag = distFromCenter;
+        var centerWeight = 0;
+        if (toCenterMag > 0.0001){
+            towardCenterX = towardCenterX / toCenterMag;
+            towardCenterY = towardCenterY / toCenterMag;
+            towardCenterZ = towardCenterZ / toCenterMag;
+            var overshoot = distFromCenter - safeRadius;
+            if (overshoot < 0){
+                overshoot = 0;
+            }
+            var containmentSpan = AquariumSize[0] - safeRadius;
+            var containmentRatio = overshoot / containmentSpan;
+            if (containmentRatio > 1){
+                containmentRatio = 1;
+            }
+            var containmentEase = containmentRatio * sqroot(containmentRatio);
+            var baseCenterPull = containmentEase * containmentStrength;
+            centerWeight = baseCenterPull * calmness;
+            moveX = moveX * (1 - centerWeight) + towardCenterX * centerWeight;
+            moveY = moveY * (1 - centerWeight) + towardCenterY * centerWeight;
+            moveZ = moveZ * (1 - centerWeight) + towardCenterZ * centerWeight;
+        }
+
+        if (sharkPerceived == 1){
+            var sharkHX = sharkEntity.heading[0];
+            var sharkHY = sharkEntity.heading[1];
+            var sharkHZ = sharkEntity.heading[2];
+            var sharkHMag = sqroot(pow(sharkHX,2) + pow(sharkHY,2) + pow(sharkHZ,2));
+            if (sharkHMag > 0.0001){
+                var fleeDirX = dx * -1;
+                var fleeDirY = dy * -1;
+                var fleeDirZ = dz * -1;
+                var fleeDirMag = sqroot(pow(fleeDirX,2) + pow(fleeDirY,2) + pow(fleeDirZ,2));
+                if (fleeDirMag > 0.0001){
+                    fleeDirX = fleeDirX / fleeDirMag;
+                    fleeDirY = fleeDirY / fleeDirMag;
+                    fleeDirZ = fleeDirZ / fleeDirMag;
+
+                    var behindX = sharkHX * -1;
+                    var behindY = sharkHY * -1;
+                    var behindZ = sharkHZ * -1;
+                    var dotBF = behindX * fleeDirX + behindY * fleeDirY + behindZ * fleeDirZ;
+                    var tanX = behindX - dotBF * fleeDirX;
+                    var tanY = behindY - dotBF * fleeDirY;
+                    var tanZ = behindZ - dotBF * fleeDirZ;
+                    var tanMag = sqroot(pow(tanX,2) + pow(tanY,2) + pow(tanZ,2));
+                    if (tanMag > 0.0001){
+                        tanX = tanX / tanMag;
+                        tanY = tanY / tanMag;
+                        tanZ = tanZ / tanMag;
+
+                        var flankWeight = urgency * flankBiasMax;
+                        moveX = moveX * (1 - flankWeight) + tanX * flankWeight;
+                        moveY = moveY * (1 - flankWeight) + tanY * flankWeight;
+                        moveZ = moveZ * (1 - flankWeight) + tanZ * flankWeight;
+                    }
+                }
+            }
+        }
+
+        var hasPrevHeading = abs(f.heading[0]) + abs(f.heading[1]) + abs(f.heading[2]) > 0.0001;
+        if (hasPrevHeading){
+            var smoothing = 0.85 * calmness;
+            moveX = moveX * (1 - smoothing) + f.heading[0] * smoothing;
+            moveY = moveY * (1 - smoothing) + f.heading[1] * smoothing;
+            moveZ = moveZ * (1 - smoothing) + f.heading[2] * smoothing;
+        }
+
+        var budget = abs(moveX) + abs(moveY) + abs(moveZ);
+        if (budget < wanderThreshold){
+            if (abs(f.heading[0]) + abs(f.heading[1]) + abs(f.heading[2]) > 0.0001){
+                moveX = f.heading[0];
+                moveY = f.heading[1];
+                moveZ = f.heading[2];
+                moveX = moveX * (1 - centerWeight) + towardCenterX * centerWeight;
+                moveY = moveY * (1 - centerWeight) + towardCenterY * centerWeight;
+                moveZ = moveZ * (1 - centerWeight) + towardCenterZ * centerWeight;
+            } else {
+                moveX = random(-1,1);
+                moveY = random(-1,1);
+                moveZ = random(-1,1);
+            }
+            budget = abs(moveX) + abs(moveY) + abs(moveZ);
+            if (budget < 0.0001){
+                return;
+            }
+            var cruiseSpeed = fishSpeed * cruiseSpeedFactor;
+            var cStepX = moveX * (cruiseSpeed / budget);
+            var cStepY = moveY * (cruiseSpeed / budget);
+            var cStepZ = moveZ * (cruiseSpeed / budget);
+            var cActual = deslocateFish(f, cStepX, cStepY, cStepZ);
+            var cActualMag = abs(cActual[0]) + abs(cActual[1]) + abs(cActual[2]);
+            if (cActualMag > 0.0001){
+                f.heading[0] = cActual[0] / cActualMag;
+                f.heading[1] = cActual[1] / cActualMag;
+                f.heading[2] = cActual[2] / cActualMag;
+            }
+            return;
+        }
+
+        var stepX = moveX * (effectiveSpeed / budget);
+        var stepY = moveY * (effectiveSpeed / budget);
+        var stepZ = moveZ * (effectiveSpeed / budget);
+        var actual = deslocateFish(f, stepX, stepY, stepZ);
+        var actualMag = abs(actual[0]) + abs(actual[1]) + abs(actual[2]);
+        if (actualMag > 0.0001){
+            f.heading[0] = actual[0] / actualMag;
+            f.heading[1] = actual[1] / actualMag;
+            f.heading[2] = actual[2] / actualMag;
+        }
+    }
+
+    function updateAllFish(){
+        updatePanicLevels();
+        for(var i = 0; i<fishCount; i++){
+            fishBrainStep(fishEntity[i], i);
+        }
+    }
+}
+
+function Main(){
+    randomSeed(42);
+
+    if (fileExists(bWeightsPath())){
+        bLoadWeights();
+    } else {
+        print("Training fish brain...");
+        bTrain();
+        bSaveWeights();
+        print("Training done.");
+    }
+
+    writeFile(animationPath, "");
+
+    spawnFish();
+
+    print("Starting alive fish:");
+    print(aliveFishCount());
+
+    var maxTicks = 2000;
+    var tick = 0;
+
+    while (aliveFishCount() > 0 && tick < maxTicks){
+        updateAllFish();
+        chaseFish();
+        tick = tick + 1;
+        logTick(tick);
+        if (tick % 100 == 0){
+            print("Tick:");
+            print(tick);
+            print("Alive:");
+            print(aliveFishCount());
+            print("Dead:");
+            print(deadFishCount());
+        }
+    }
+
+    print("Simulation ended after this many ticks:");
+    print(tick);
+    print("Final alive:");
+    print(aliveFishCount());
+    print("Final dead:");
+    print(deadFishCount());
+    print("Animation log written to " + animationPath);
+}
+Main();

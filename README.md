@@ -177,7 +177,7 @@ print(x == 16 && x != 0);   // true
 > See `examples/Basics/basics.cnr` for every operator exercised with its expected output.
 
 ### Control Flow
-
+- `Sector` Easy way to arrange your code.
 - `if` / `else`
 - `while` loops
 - `for` loops (C-style), with increments written any of three equivalent ways: `i = i + 1`, `i += 1`, or `i++`

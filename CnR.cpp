@@ -40,6 +40,7 @@ enum class TokType {
     DataKw, TableKw,
     IntKw, LongKw, FloatKw, BigIntKw, BigFloatKw,
     SwitchKw, CaseKw, DefaultKw, BreakKw, ContinueKw,
+    SectorKw,
     Plus, Minus, Star, Slash, Percent,
     Assign,
     PlusAssign, MinusAssign, StarAssign, SlashAssign,
@@ -109,6 +110,7 @@ struct Lexer {
             {"switch", TokType::SwitchKw}, {"case", TokType::CaseKw}, {"default", TokType::DefaultKw},
             {"break", TokType::BreakKw}, {"continue", TokType::ContinueKw},
             {"mutable", TokType::MutableKw}, {"mutex", TokType::MutexKw},
+            {"Sector", TokType::SectorKw},
         };
         return kw;
     }
@@ -1754,25 +1756,56 @@ struct Parser {
         return dd;
     }
 
+    // Parses `Sector Name { ... }` -- a purely organizational grouping with
+    // no runtime meaning at all. Everything declared inside (functions,
+    // Structs, Data blocks, top-level statements, even nested Sectors) is
+    // flattened straight into `prog`, exactly as if the Sector wrapper
+    // weren't there. The name is parsed and discarded; it exists only so
+    // the source reads like `Sector Variables { ... }` / `Sector Functions
+    // { ... }` for the author's own organization.
+    void parseSectorInto(Program& prog) {
+        advance(); // 'Sector'
+        expect(TokType::Ident, "sector name");
+        expect(TokType::LBrace, "{");
+        while(!check(TokType::RBrace)) {
+            if(check(TokType::End))
+                throw std::runtime_error("Unexpected end of file inside Sector block");
+            parseTopLevelInto(prog);
+        }
+        expect(TokType::RBrace, "}");
+    }
+
+    // Parses one top-level item (function/Struct/Data/Sector/statement) and
+    // adds it to `prog`. Shared by parseProgram() (top of file) and
+    // parseSectorInto() (inside a Sector block) so both accept exactly the
+    // same set of top-level constructs, including Sectors nested in Sectors.
+    void parseTopLevelInto(Program& prog) {
+        if(check(TokType::Function)) {
+            auto fn = parseFunctionDecl();
+            prog.functions[fn.name] = fn;
+            return;
+        }
+        if(check(TokType::StructKw)) {
+            auto sd = parseStructDecl();
+            prog.structs[sd.name] = sd;
+            return;
+        }
+        if(check(TokType::DataKw)) {
+            auto dd = parseDataDecl();
+            prog.datas[dd.name] = dd;
+            return;
+        }
+        if(check(TokType::SectorKw)) {
+            parseSectorInto(prog);
+            return;
+        }
+        prog.statements.push_back(parseStatement());
+    }
+
     Program parseProgram() {
         Program prog;
         while(!check(TokType::End)) {
-            if(check(TokType::Function)) {
-                auto fn = parseFunctionDecl();
-                prog.functions[fn.name] = fn;
-                continue;
-            }
-            if(check(TokType::StructKw)) {
-                auto sd = parseStructDecl();
-                prog.structs[sd.name] = sd;
-                continue;
-            }
-            if(check(TokType::DataKw)) {
-                auto dd = parseDataDecl();
-                prog.datas[dd.name] = dd;
-                continue;
-            }
-            prog.statements.push_back(parseStatement());
+            parseTopLevelInto(prog);
         }
         return prog;
     }
@@ -4464,6 +4497,20 @@ Value evalBinaryValue(const std::shared_ptr<BinaryExpr>& b) {
     return numericBinaryOp(b->op, L, R);
 }
 
+// Slot-array bookkeeping: a `var[]` array normally stores plain doubles in
+// `array`. To also let it hold struct/object elements (e.g.
+// fishEntity.push(Fish(px, py))), non-numeric pushes are additionally
+// recorded in ex().objectArray, a parallel std::vector<Value> of the same
+// length as `array`. Each slot in objectArray mirrors the corresponding
+// index in `array`: for a numeric element the slot is a default/null Value
+// (meaning "look at array[i] instead"); for a struct/object/string/bool
+// element pushed via push(), the slot holds the real Value and array[i] is
+// just a 0.0 placeholder so existing size-based code (len(), pop(), loops
+// bounded by len()) keeps working unchanged.
+bool valueNeedsObjectSlot(const Value& v) {
+    return v.isStruct || v.isObject || v.isString || v.isBool || v.isNull;
+}
+
 double evalNumber(const ExprPtr& expr)
 {
     // Dispatch on the AST tag instead of trying std::dynamic_pointer_cast<T>
@@ -4594,7 +4641,11 @@ double evalNumber(const ExprPtr& expr)
 
     case ExprKind::ArrayMethodCall: {
         auto am = std::static_pointer_cast<ArrayMethodCallExpr>(expr);
-        return callArrayMethod(am);
+        Value v = callArrayMethod(am);
+        if(v.isArray) throw std::runtime_error("Cannot use array result of '" + am->arrayName + "." + "' as a number");
+        if(v.isStruct) throw std::runtime_error("Cannot use struct result of '" + am->arrayName + "' method as a number");
+        if(v.isObject) throw std::runtime_error("Cannot use object result of '" + am->arrayName + "' method as a number");
+        return v.isBool ? (v.boolean ? 1.0 : 0.0) : v.number;
     }
 
     case ExprKind::MutexMethodCall: {
@@ -4676,7 +4727,7 @@ Value evalToValue(const ExprPtr& expr) {
     case ExprKind::JoinAll:
         return joinAllThreads(std::static_pointer_cast<JoinAllExpr>(expr));
     case ExprKind::ArrayMethodCall: {
-        Value v; v.number = callArrayMethod(std::static_pointer_cast<ArrayMethodCallExpr>(expr)); return v;
+        return callArrayMethod(std::static_pointer_cast<ArrayMethodCallExpr>(expr));
     }
     case ExprKind::StringLit:
         return Value::makeString(static_cast<StringLitExpr*>(expr.get())->value);
@@ -4820,6 +4871,10 @@ Value evalToValue(const ExprPtr& expr) {
         }
         if(index < 0 || index >= (int)val.array.size())
             throw std::runtime_error("Array index out of bounds for '" + a->arrayName + "': " + std::to_string(index));
+        if(val.cex().objectArray && index < (int)val.cex().objectArray->size()) {
+            const Value& slot = (*val.cex().objectArray)[index];
+            if(valueNeedsObjectSlot(slot)) return slot;
+        }
         Value v; v.number = val.array[index]; return v;
     }
     case ExprKind::TensorAccess: {
@@ -4845,45 +4900,70 @@ Value evalToValue(const ExprPtr& expr) {
     Value v; v.number = evalNumber(expr); return v;
 }
 
-double callArrayMethod(const std::shared_ptr<ArrayMethodCallExpr>& am) {
+// Ensures val.ex().objectArray exists and has exactly val.array.size() slots,
+// padding any newly-created or newly-extended slots with default Values
+// (which read back as "not an object slot, use array[i]").
+void ensureObjectSlots(Value& val) {
+    if(!val.ex().objectArray) val.ex().objectArray = std::make_shared<std::vector<Value>>();
+    if(val.ex().objectArray->size() < val.array.size())
+        val.ex().objectArray->resize(val.array.size());
+}
+
+Value callArrayMethod(const std::shared_ptr<ArrayMethodCallExpr>& am) {
     Value& val = resolveVar(am->arrayName);
     if(!val.isArray)
         throw std::runtime_error("'" + am->arrayName + "' is not an array");
     switch(am->method) {
     case ArrayMethod::Push: {
-        double x = evalNumber(am->arg);
-        val.array.push_back(x);
-        return (double)val.array.size();
+        Value pushed = evalToValue(am->arg);
+        if(valueNeedsObjectSlot(pushed)) {
+            ensureObjectSlots(val);
+            val.array.push_back(0.0); // placeholder, keeps array.size() in sync
+            val.ex().objectArray->push_back(pushed);
+        } else {
+            double x = pushed.isBool ? (pushed.boolean ? 1.0 : 0.0) : pushed.number;
+            val.array.push_back(x);
+            if(val.ex().objectArray) val.ex().objectArray->push_back(Value());
+        }
+        Value ret; ret.number = (double)val.array.size(); return ret;
     }
     case ArrayMethod::Pop: {
         if(val.array.empty())
             throw std::runtime_error("Cannot pop() from empty array '" + am->arrayName + "'");
+        if(val.cex().objectArray && !val.cex().objectArray->empty()) {
+            Value back = val.cex().objectArray->back();
+            val.ex().objectArray->pop_back();
+            val.array.pop_back();
+            if(valueNeedsObjectSlot(back)) return back;
+            Value ret; ret.number = back.number; return ret;
+        }
         double back = val.array.back();
         val.array.pop_back();
-        return back;
+        Value ret; ret.number = back; return ret;
     }
     case ArrayMethod::Sort: {
         std::sort(val.array.begin(), val.array.end());
-        return (double)val.array.size();
+        Value ret; ret.number = (double)val.array.size(); return ret;
     }
     case ArrayMethod::Reverse: {
         std::reverse(val.array.begin(), val.array.end());
-        return (double)val.array.size();
+        if(val.ex().objectArray) std::reverse(val.ex().objectArray->begin(), val.ex().objectArray->end());
+        Value ret; ret.number = (double)val.array.size(); return ret;
     }
     case ArrayMethod::Contains: {
         double target = evalNumber(am->arg);
-        for(double x : val.array) if(x==target) return 1.0;
-        return 0.0;
+        for(double x : val.array) if(x==target) { Value r; r.number=1.0; return r; }
+        Value r; r.number = 0.0; return r;
     }
     case ArrayMethod::IndexOf: {
         double target = evalNumber(am->arg);
-        for(size_t i=0;i<val.array.size();++i) if(val.array[i]==target) return (double)i;
-        return -1.0;
+        for(size_t i=0;i<val.array.size();++i) if(val.array[i]==target) { Value r; r.number=(double)i; return r; }
+        Value r; r.number = -1.0; return r;
     }
     case ArrayMethod::Accumulate: {
         double sum = 0;
         for(double x : val.array) sum += x;
-        return sum;
+        Value r; r.number = sum; return r;
     }
     }
     throw std::runtime_error("Unknown array method.");
