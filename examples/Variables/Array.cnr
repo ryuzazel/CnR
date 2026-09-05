@@ -54,3 +54,5 @@ A1[0] = 10;
 print(ACLONE[0]);
 print(AREF[0]);
 print(ACLONEalias[0]);
+ACLONEalias.delete(0);
+print(ACLONEalias[0]);
