@@ -1,0 +1,9 @@
+/home/ryu/Reaprendizado/008/build/CMakeFiles/CnR.dir
+/home/ryu/Reaprendizado/008/build/CMakeFiles/package.dir
+/home/ryu/Reaprendizado/008/build/CMakeFiles/package_source.dir
+/home/ryu/Reaprendizado/008/build/CMakeFiles/edit_cache.dir
+/home/ryu/Reaprendizado/008/build/CMakeFiles/rebuild_cache.dir
+/home/ryu/Reaprendizado/008/build/CMakeFiles/list_install_components.dir
+/home/ryu/Reaprendizado/008/build/CMakeFiles/install.dir
+/home/ryu/Reaprendizado/008/build/CMakeFiles/install/local.dir
+/home/ryu/Reaprendizado/008/build/CMakeFiles/install/strip.dir

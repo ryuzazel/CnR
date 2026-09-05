@@ -19,6 +19,8 @@
 #include <cmath>
 #include <mutex>
 #include <complex>
+#include <unordered_set>
+#include <dirent.h>
 #ifndef _WIN32
 #include <unistd.h>
 #else
@@ -41,6 +43,7 @@ enum class TokType {
     IntKw, LongKw, FloatKw, BigIntKw, BigFloatKw,
     SwitchKw, CaseKw, DefaultKw, BreakKw, ContinueKw,
     SectorKw,
+    BundleKw, GatherKw, AsKw,
     Plus, Minus, Star, Slash, Percent,
     Assign,
     PlusAssign, MinusAssign, StarAssign, SlashAssign,
@@ -111,6 +114,7 @@ struct Lexer {
             {"break", TokType::BreakKw}, {"continue", TokType::ContinueKw},
             {"mutable", TokType::MutableKw}, {"mutex", TokType::MutexKw},
             {"Sector", TokType::SectorKw},
+            {"Bundle", TokType::BundleKw}, {"Gather", TokType::GatherKw}, {"as", TokType::AsKw},
         };
         return kw;
     }
@@ -248,12 +252,12 @@ enum class ExprKind {
     FloatCast, BigIntCast, BigFloatCast, StringLit, JsonObjectLit, HttpCall,
     Len, ArrayAccess, TensorAccess, Call, MemberAccess, Thread, Join, JoinAll,
     ArrayMethodCall, Fail, Throw, ServerConfig, ObjectMethodCall, DbMethodCall,
-    MutexNew, MutexMethodCall
+    MutexNew, MutexMethodCall, CloneCall, RefCall
 };
 enum class StmtKind {
     VarDecl, Assign, ArrayAssign, MemberAssign, Print, Block, If, While, For,
     Return, ExprS, Parallel, Nodes, TryCatch, RouteDecl, ServerStart,
-    Break, Continue, Switch
+    Break, Continue, Switch, Bundle, Gather
 };
 
 struct Expr { ExprKind kind; explicit Expr(ExprKind k):kind(k){} virtual ~Expr() = default; };
@@ -330,8 +334,37 @@ struct MutexMethodCallExpr : Expr {
 enum class ArrayMethod { Push, Pop, Sort, Reverse, Contains, IndexOf, Accumulate };
 struct ArrayMethodCallExpr : Expr { std::string arrayName; ArrayMethod method; ExprPtr arg; ArrayMethodCallExpr():Expr(ExprKind::ArrayMethodCall){} };
 
+// `a.clone()` -- returns an independent copy of array `a` (see
+// CnR_SPEC.md %2.1). Functionally identical to bare assignment (`var[] b =
+// a;`), since ordinary Value copies are already deep here -- .clone() and
+// bare assignment are both handled by the exact same VarDecl execution path
+// (see arrayFromExpr on VarDeclStmt), .clone() exists as an explicit,
+// self-documenting spelling of the same thing.
+struct CloneCallExpr : Expr { std::string arrayName; CloneCallExpr():Expr(ExprKind::CloneCall){} };
+
+// `a.ref()` -- returns a shared reference/alias to array `a` (see
+// CnR_SPEC.md %2.1): mutating the result mutates `a` too, like C++'s
+// `auto& c = a;`. Implemented via the same SharedCell aliasing mechanism
+// `mutable var` uses (see SharedCell/ValueExtra::isMutableCell) -- a .ref()
+// result is a mutable-cell handle pointing at the *same* cell as the
+// source, whether or not the source was itself declared `mutable`. Unlike
+// `mutable`, a plain .ref() alias does not imply any cross-thread locking
+// contract; resolveVar()'s transparent unwrap (see its comment) is what
+// makes every existing array operation (indexing, push/pop/sort/..., passing
+// to a function, etc.) work unchanged on a .ref() handle with no code
+// duplication. See CnR_SPEC.md %2.3: using .ref() on an array subsequently
+// used inside a Chunk/Shard body is meant to be a compile-time error --
+// not yet enforced, since Chunk/Shard don't exist in this interpreter yet.
+struct RefCallExpr : Expr { std::string arrayName; RefCallExpr():Expr(ExprKind::RefCall){} };
+
 struct VarDeclStmt : Stmt {
     bool isArray = false; bool isEmptyArray = false; std::string name; ExprPtr value; std::vector<ExprPtr> arrayValues;
+    // True when this array declaration's value came from an arbitrary
+    // expression (`var[] b = a;`, `a.clone()`, `a.ref()`, an array-returning
+    // call) rather than a `{...}` literal -- see parseVarDecl. When set,
+    // `value` holds that expression and `arrayValues` is unused; VarDecl
+    // execution evaluates `value` and expects an array-typed Value back.
+    bool arrayFromExpr = false;
     // tensorRank>0 means this was declared with 2+ bracket pairs, e.g.
     // var[][] m = {...}; (rank 2, a Matrix) or var[][][] t = {...}; (rank 3,
     // a Tensor). rank==1 (plain var[] arr = {...};) keeps using arrayValues
@@ -420,6 +453,46 @@ struct NodesStmt : Stmt {
     std::string workflowName;
     std::vector<NodeDecl> nodes;
     NodesStmt():Stmt(StmtKind::Nodes){}
+};
+
+// --- Bundle / Gather module interconnection ---
+//
+// `Bundle Name { sym1; sym2(); ... }` -- declares which top-level symbols
+// (vars and/or functions) defined earlier in *this* file are visible to
+// other files. Everything not listed stays private. This is a declaration
+// (like Struct/function), not an executable statement: it carries no
+// runtime behavior of its own, it's metadata consumed by the module loader
+// when another file Gathers this one. `exportedSymbols` holds the bare
+// names exactly as written in the block body (the trailing `()` on a
+// function reference, e.g. `sum();`, is parsed and discarded -- inside a
+// Bundle block a name always means "export this symbol", never "call it").
+struct BundleDecl {
+    std::string name;
+    std::vector<std::string> exportedSymbols;
+    int line = 0;
+};
+
+// `Gather(Bundle Name [as Alias]) { ... }` or the shorthand `Gather(Name [as
+// Alias]) { ... }` -- pulls a Bundle's exported symbols into scope, but only
+// inside the lexical body of this statement. `sourceFile` is resolved by the
+// module loader (see resolveBundleSourceFile) before this statement ever
+// reaches the interpreter -- the parser records `bundleName`/`alias` only;
+// gatherAndRewrite() (in the module-loader pass, see below) fills in
+// `sourceFile`, and rewrites every unqualified/aliased reference to the
+// gathered symbols inside `body` to their mangled internal names
+// (`Bundle::symbol`) so the interpreter's ordinary flat name resolution
+// (`functions` map / scope lookup) just works with no runtime namespacing
+// logic at all. `hadExplicitBundleKw` records whether the source wrote
+// `Gather(Bundle X ...)` or the shorthand `Gather(X ...)` -- both are
+// accepted per spec %1.5, this is purely for potential diagnostics.
+struct GatherStmt : Stmt {
+    std::string bundleName;
+    std::string alias;              // == bundleName if no "as" clause given
+    bool hadExplicitBundleKw = false;
+    std::string sourceFile;         // filled in by the module-loader pass
+    std::shared_ptr<BlockStmt> body;
+    int line = 0;
+    GatherStmt():Stmt(StmtKind::Gather){}
 };
 
 // Throw("message"); -- raises a catchable runtime error carrying a string
@@ -550,6 +623,7 @@ struct Program {
     std::unordered_map<std::string, FunctionDecl> functions;
     std::unordered_map<std::string, StructDecl> structs;
     std::unordered_map<std::string, DataDecl> datas;
+    std::unordered_map<std::string, BundleDecl> bundles;
 };
 
 struct Parser {
@@ -779,6 +853,33 @@ struct Parser {
                 }
                 throw std::runtime_error("joinAll() must be called on an array name, line " + std::to_string(peek().line));
             }
+            // a.clone() / a.ref() -- see CnR_SPEC.md %2.1. Parsed
+            // separately from the tryArrayMethodName table above (rather
+            // than added to ArrayMethod) since they return a whole array
+            // Value, not a scalar -- callArrayMethod()'s existing methods
+            // (push/pop/sort/...) all return numbers, so folding clone/ref
+            // into that enum would require every call site of
+            // ArrayMethodCallExpr to handle an array-typed result. Kept as
+            // their own ExprKinds instead, evaluated by evalToValue()
+            // alongside other array-producing expressions.
+            if(peek(1).type == TokType::Ident && (peek(1).text == "clone" || peek(1).text == "ref") && peek(2).type == TokType::LParen) {
+                if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+                    bool isClone = (peek(1).text == "clone");
+                    advance(); advance(); advance(); // . clone/ref (
+                    expect(TokType::RParen,")");
+                    if(isClone) {
+                        auto c = std::make_shared<CloneCallExpr>();
+                        c->arrayName = v->name;
+                        expr = c;
+                    } else {
+                        auto r = std::make_shared<RefCallExpr>();
+                        r->arrayName = v->name;
+                        expr = r;
+                    }
+                    continue;
+                }
+                throw std::runtime_error("'" + peek(1).text + "()' must be called on an array name, line " + std::to_string(peek().line));
+            }
             {
                 ArrayMethod m;
                 if(peek(1).type == TokType::Ident && tryArrayMethodName(peek(1).text, m) && peek(2).type == TokType::LParen) {
@@ -801,6 +902,46 @@ struct Parser {
                     std::string tableName = peek(1).text;
                     advance(); advance(); // '.' tableName
                     expr = parseDbMethodCall(v->name, tableName);
+                    continue;
+                }
+            }
+            // Ex.sum(1, 1) -- a Gather-qualified function call: `id . name (`
+            // where `name` isn't already claimed by one of the more specific
+            // dotted forms above (array/db/mutex methods, join/joinAll).
+            // This is deliberately unconditional on `name` being anything in
+            // particular -- Gather aliases can wrap any exported function
+            // name, so unlike the array/db method branches above there is no
+            // fixed method-name table to check against here. Bundle/Gather's
+            // parse-time rewrite (rewriteGatheredRefsInExpr) later turns
+            // this CallExpr's name from "sum" into "Alias::sum" once the
+            // gathered symbol set is known; if it's never rewritten (i.e.
+            // this wasn't actually inside a Gather body), it just fails at
+            // call time as an ordinary "Undefined function" error, since no
+            // real function is named "square" etc. either -- matching %1.3's
+            // "no direct-access shortcut" requirement without needing the
+            // parser itself to know what's been Gathered.
+            if(auto v = std::dynamic_pointer_cast<VarExpr>(expr)) {
+                if(peek(1).type == TokType::Ident && peek(2).type == TokType::LParen) {
+                    std::string calleeName = peek(1).text;
+                    advance(); advance(); advance(); // '.' name '('
+                    auto call = std::make_shared<CallExpr>();
+                    // Encode the qualified call as "Alias.name" in the
+                    // CallExpr's name field; rewriteGatheredRefsInExpr looks
+                    // for exactly this "<alias>.<member>" shape (see below)
+                    // and rewrites it to the mangled "<Bundle>::<member>"
+                    // form. An ordinary (non-Gathered) call never produces
+                    // a dot in its name, so this can't collide with any
+                    // existing function-name lookup.
+                    call->name = v->name + "." + calleeName;
+                    if(!check(TokType::RParen)) {
+                        while(true) {
+                            call->args.push_back(parseExpression());
+                            if(match(TokType::Comma)) continue;
+                            break;
+                        }
+                    }
+                    expect(TokType::RParen,")");
+                    expr = call;
                     continue;
                 }
             }
@@ -1135,14 +1276,26 @@ struct Parser {
             if(match(TokType::Assign)) {
                 if(check(TokType::String)) {
                     stmt->arrayValues = stringToArrayValues(advance().text);
-                } else {
-                    expect(TokType::LBrace,"{");
+                } else if(check(TokType::LBrace)) {
+                    advance();
                     while(true) {
                         stmt->arrayValues.push_back(parseExpression());
                         if(match(TokType::Comma)) continue;
                         break;
                     }
                     expect(TokType::RBrace,"}");
+                } else {
+                    // Not a literal -- an arbitrary expression expected to
+                    // evaluate to a whole array: `var[] b = a;` (bare
+                    // assignment, an independent copy per %2.1), `var[] b =
+                    // a.clone();` (explicit independent copy), `var[] b =
+                    // a.ref();` (shared reference/aliasing), or a
+                    // function call that returns an array. Stored in
+                    // `value` (like the scalar case below) rather than
+                    // `arrayValues`; VarDecl execution branches on which
+                    // one is populated.
+                    stmt->value = parseExpression();
+                    stmt->arrayFromExpr = true;
                 }
             } else {
                 stmt->isEmptyArray = true;
@@ -1164,6 +1317,16 @@ struct Parser {
             expect(TokType::Assign,"=");
             if(check(TokType::String)) {
                 stmt->arrayValues = stringToArrayValues(advance().text);
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                return stmt;
+            }
+            if(!check(TokType::LBrace)) {
+                // See the identical branch above (var[] name = ...) for why:
+                // an arbitrary expression evaluating to a whole array
+                // (bare assignment / .clone() / .ref() / array-returning
+                // call), not a `{...}` literal.
+                stmt->value = parseExpression();
+                stmt->arrayFromExpr = true;
                 if(consumeSemicolon) expect(TokType::Semicolon,";");
                 return stmt;
             }
@@ -1284,6 +1447,23 @@ struct Parser {
                 if(consumeSemicolon) expect(TokType::Semicolon,";");
                 auto stmt = std::make_shared<ExprStmt>();
                 stmt->expr = fullExpr;
+                return stmt;
+            }
+            if(peek(1).type == TokType::Ident && (peek(1).text == "clone" || peek(1).text == "ref") && peek(2).type == TokType::LParen) {
+                bool isClone = (peek(1).text == "clone");
+                advance(); advance(); advance(); // . clone/ref (
+                expect(TokType::RParen,")");
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                auto stmt = std::make_shared<ExprStmt>();
+                if(isClone) {
+                    auto c = std::make_shared<CloneCallExpr>();
+                    c->arrayName = id.text;
+                    stmt->expr = c;
+                } else {
+                    auto r = std::make_shared<RefCallExpr>();
+                    r->arrayName = id.text;
+                    stmt->expr = r;
+                }
                 return stmt;
             }
             {
@@ -1522,6 +1702,53 @@ struct Parser {
         return node;
     }
 
+    // `Bundle Name { sym1; sym2(); ... }` -- a declaration (like Struct or
+    // function), parsed at top level and recorded in Program::bundles, never
+    // turned into an executable Stmt. Each line inside the block is a bare
+    // symbol reference: `name;` exports a var, `sum();` exports a function
+    // (the `()` is syntax only -- it is never a call here, per spec %1.2).
+    BundleDecl parseBundleDecl() {
+        expect(TokType::BundleKw,"Bundle");
+        BundleDecl bd;
+        Token nameTok = expect(TokType::Ident,"Bundle name");
+        bd.name = nameTok.text;
+        bd.line = nameTok.line;
+        expect(TokType::LBrace,"{");
+        while(!check(TokType::RBrace)) {
+            if(check(TokType::End))
+                throw std::runtime_error("Unexpected end of file inside Bundle '" + bd.name + "'");
+            std::string sym = expect(TokType::Ident,"exported symbol name").text;
+            if(match(TokType::LParen)) expect(TokType::RParen,")"); // optional `()` marker, discarded
+            expect(TokType::Semicolon,";");
+            bd.exportedSymbols.push_back(sym);
+        }
+        expect(TokType::RBrace,"}");
+        return bd;
+    }
+
+    // `Gather(Bundle Name [as Alias]) { ... }` or the shorthand form
+    // `Gather(Name [as Alias]) { ... }`. Only parses the statement's own
+    // shape here (bundle name, optional alias, body block) -- resolving
+    // which file `Name` lives in, loading it, and rewriting `body` to use
+    // the gathered symbols' mangled names all happens in a later pass (see
+    // resolveGatherStatements), because that requires filesystem access and
+    // cross-file knowledge the Parser for a single file doesn't have.
+    StmtPtr parseGather() {
+        Token gatherTok = expect(TokType::GatherKw,"Gather");
+        expect(TokType::LParen,"(");
+        auto stmt = std::make_shared<GatherStmt>();
+        stmt->line = gatherTok.line;
+        if(match(TokType::BundleKw)) stmt->hadExplicitBundleKw = true;
+        stmt->bundleName = expect(TokType::Ident,"Bundle name").text;
+        stmt->alias = stmt->bundleName;
+        if(match(TokType::AsKw)) {
+            stmt->alias = expect(TokType::Ident,"alias name").text;
+        }
+        expect(TokType::RParen,")");
+        stmt->body = parseBlock();
+        return stmt;
+    }
+
     StmtPtr parseNodes() {
         expect(TokType::NodesKw,"Nodes");
         auto stmt = std::make_shared<NodesStmt>();
@@ -1629,6 +1856,7 @@ struct Parser {
         if(check(TokType::Return)) return parseReturn();
         if(check(TokType::Parallel)) return parseParallel();
         if(check(TokType::NodesKw)) return parseNodes();
+        if(check(TokType::GatherKw)) return parseGather();
         if(check(TokType::TryKw)) return parseTryCatch();
         if(check(TokType::SwitchKw)) return parseSwitch();
         if(check(TokType::BreakKw)) return parseBreak();
@@ -1793,6 +2021,11 @@ struct Parser {
         if(check(TokType::DataKw)) {
             auto dd = parseDataDecl();
             prog.datas[dd.name] = dd;
+            return;
+        }
+        if(check(TokType::BundleKw)) {
+            auto bd = parseBundleDecl();
+            prog.bundles[bd.name] = bd;
             return;
         }
         if(check(TokType::SectorKw)) {
@@ -2293,6 +2526,16 @@ struct ValueExtra {
     // `mutable var` values: isMutableCell + cell. See SharedCell above.
     bool isMutableCell = false;
     std::shared_ptr<SharedCell> cell;
+
+    // Set on an array Value the moment it's produced by bare assignment or
+    // .clone() (see markBareArrayCopy/VarDeclStmt::arrayFromExpr and
+    // CnR_SPEC.md %2.1's compiler-hint note). Cleared the first time any
+    // mutating array operation (push/pop/sort/reverse/index-assign/delete)
+    // runs on this exact slot -- see the mutation call sites for
+    // maybeWarnBareArrayMutation(). Purely a one-time diagnostic; carries no
+    // functional/semantic weight (the copy already happened correctly
+    // either way).
+    bool bareArrayCopyPendingHint = false;
 };
 
 struct Value {
@@ -4234,6 +4477,275 @@ private:
     }
 };
 
+std::string loadFile(const std::string& path)
+{
+    std::ifstream in(path);
+    if(!in) throw std::runtime_error("Cannot open file: " + path);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// ============================================================================
+// Bundle / Gather -- module interconnection (see CnR_SPEC.md %1).
+//
+// Everything declared in a .cnr file is private by default; `Bundle Name {
+// sym1; sym2(); }` marks specific top-level vars/functions as exportable,
+// and `Gather(Bundle Name [as Alias]) { ... }` is the *only* way another
+// file can reach them (there is deliberately no direct-access shortcut --
+// %1.3). This is implemented as a standalone pass that runs after each
+// file is parsed but before interpretation starts:
+//
+//   1. Parse the entry file's Program as usual (Bundle/Gather are just new
+//      grammar at this point -- Bundle sits in Program::bundles like any
+//      other declaration table, Gather is an ordinary GatherStmt in the
+//      statement list, wherever it lexically appears).
+//   2. Walk the Program looking for GatherStmts. For each one, find which
+//      sibling .cnr file defines a `Bundle <bundleName> { ... }` (see
+//      resolveBundleSourceFile), parse *that* file into its own Program
+//      (cached by path, so multiple Gathers of the same Bundle -- or a
+//      diamond of files gathering a shared one -- only parse it once),
+//      and pull its exported functions/vars into the requesting Program:
+//        - each exported function is copied into the requesting Program's
+//          `functions` table under a mangled name "<Bundle>::<symbol>";
+//        - each exported var is captured by running the *source* file's
+//          top-level statements to completion in an isolated Interpreter
+//          (top-level vars are just executed statements, not a
+//          declaration table -- see the comment on Program::statements)
+//          and reading the resulting global scope, then stashed as a
+//          GatheredVar the requesting Interpreter seeds into a fresh
+//          child scope right before running the Gather body.
+//   3. Rewrite every reference to a gathered symbol *inside the Gather
+//      body only* (both the aliased form `Alias.sym` and, when no alias
+//      differs from the bundle name, the bare form `sym`) to the mangled
+//      name. Because Gather's visibility is purely lexical (%1.3/%1.4),
+//      this rewrite can happen once, at load time, with zero new runtime
+//      dispatch: ordinary flat function-table lookup and ordinary scope
+//      lookup do the rest, exactly as they already do for every other
+//      function call and variable reference in the language.
+//
+// A file that does NOT go through this pass (i.e. a bare `Example.sum()`
+// with no enclosing Gather) is simply never rewritten, so `Example` stays
+// an ordinary undefined identifier and fails with the existing "Undefined
+// variable" error, which callCallable()/lookupVar() already raise -- see
+// the Gather execute() case for the friendlier diagnostic text.
+// ============================================================================
+
+// One exported var's captured value, produced by fully running the source
+// file's top-level statements once (see loadBundleModule).
+struct GatheredVar { std::string mangledName; Value value; };
+
+struct BundleModule {
+    Program program;                              // the source file's full parsed Program
+    std::string sourcePath;
+    std::unordered_map<std::string, FunctionDecl> exportedFunctions;  // key: mangled name
+    std::vector<GatheredVar> exportedVars;         // computed lazily, see below
+    bool varsComputed = false;
+};
+
+// Cache of already-parsed/loaded Bundle source files, keyed by resolved
+// path, so a Bundle Gathered from several places (or transitively) is only
+// parsed -- and its top-level statements only executed -- once per run.
+static std::unordered_map<std::string, std::shared_ptr<BundleModule>> g_bundleModuleCache;
+
+// Tracks paths currently mid-load (parsed but not yet fully resolved/cached)
+// so a cycle of Bundles Gathering each other (A Gathers B, B Gathers A) is
+// caught as a clear error instead of recursing through loadBundleModule ->
+// resolveGatherStatements -> loadBundleModule ... until the C++ call stack
+// overflows.
+static std::unordered_set<std::string> g_bundleModulesInProgress;
+
+// Every Bundle name seen in any Program parsed so far this run (the entry
+// file, plus every file loaded while resolving a Gather) -- used purely to
+// give resolveVar()'s "Undefined variable" error a friendlier hint when the
+// undefined name happens to be a real Bundle that just wasn't Gathered
+// (%1.3 asks for this). Deliberately *not* used for anything functional:
+// membership here never grants access to a Bundle's contents, it only
+// improves one error message.
+static std::unordered_set<std::string> g_knownBundleNames;
+
+// Finds which .cnr file (other than `fromFile`, and other than files
+// already loaded) declares `Bundle <bundleName> { ... }`. The spec's
+// Gather syntax never carries an explicit file path/import string, so the
+// only workable resolution strategy is scanning sibling .cnr files in the
+// entry file's directory for one that defines a Bundle with this name --
+// mirroring how the spec's own multi-file examples (%1.6) simply put
+// `Bundle Math` in "Math.cnr" without any file reference in Main.cnr.
+// Populates g_knownBundleNames with every `Bundle <Name>` declared in any
+// .cnr/.CnR file sharing a directory with `fromFile`, purely so
+// lookupVar()'s error hint (%1.3) can recognize a bare `Example.foo`
+// reference as "a real Bundle you forgot to Gather" even when nothing in
+// this run ever actually Gathers it (so loadBundleModule/
+// resolveBundleSourceFile never got a chance to see it either). This is
+// deliberately shallow -- textual scan + full parse of each candidate file,
+// same cost as one resolveBundleSourceFile scan -- run once, up front, from
+// main(), not on every failed lookup.
+void scanDirectoryForBundleNames(const std::string& fromFile) {
+    std::string dir = ".";
+    auto slash = fromFile.find_last_of("/\\");
+    if(slash != std::string::npos) dir = fromFile.substr(0, slash);
+    DIR* d = opendir(dir.c_str());
+    if(!d) return; // best-effort only -- never fail the run over this
+    struct dirent* entry;
+    while((entry = readdir(d)) != nullptr) {
+        std::string fname = entry->d_name;
+        if(fname.size() < 4) continue;
+        bool isCnr = (fname.substr(fname.size()-4) == ".cnr") || (fname.substr(fname.size()-4) == ".CnR");
+        if(!isCnr) continue;
+        std::string full = dir + "/" + fname;
+        std::string src;
+        try { src = loadFile(full); } catch(...) { continue; }
+        if(src.find("Bundle") == std::string::npos) continue;
+        try {
+            Lexer lx(src);
+            auto toks = lx.tokenize();
+            Parser p(toks);
+            Program prog = p.parseProgram();
+            for(auto& kv : prog.bundles) g_knownBundleNames.insert(kv.first);
+        } catch(...) { continue; }
+    }
+    closedir(d);
+}
+
+std::string resolveBundleSourceFile(const std::string& bundleName, const std::string& fromFile) {
+    std::string dir = ".";
+    auto slash = fromFile.find_last_of("/\\");
+    if(slash != std::string::npos) dir = fromFile.substr(0, slash);
+
+    // Fast path: a file literally named <BundleName>.cnr is checked first,
+    // since that's the convention every spec example follows (Bundle Math
+    // lives in Math.cnr, Bundle Example lives in a file also reasonably
+    // named after it) -- avoids a directory scan in the common case.
+    std::vector<std::string> candidates = { dir + "/" + bundleName + ".cnr", dir + "/" + bundleName + ".CnR" };
+    for(auto& c : candidates) {
+        std::ifstream probe(c);
+        if(probe) return c;
+    }
+
+    // Fall back to scanning every .cnr/.CnR file in the directory and
+    // checking which one actually contains `Bundle <bundleName>`. This
+    // handles the case where the file defining the Bundle isn't named
+    // after it.
+    DIR* d = opendir(dir.c_str());
+    if(!d) throw std::runtime_error("Gather: cannot search directory '" + dir + "' for Bundle '" + bundleName + "'");
+    std::string found;
+    struct dirent* entry;
+    while((entry = readdir(d)) != nullptr) {
+        std::string fname = entry->d_name;
+        if(fname.size() < 4) continue;
+        bool isCnr = (fname.substr(fname.size()-4) == ".cnr") || (fname.substr(fname.size()-4) == ".CnR");
+        if(!isCnr) continue;
+        std::string full = dir + "/" + fname;
+        if(full == fromFile) continue;
+        std::string src;
+        try { src = loadFile(full); } catch(...) { continue; }
+        // Cheap textual pre-check before a full parse, since most files in
+        // the scan won't declare this Bundle at all.
+        if(src.find("Bundle") == std::string::npos) continue;
+        if(src.find(bundleName) == std::string::npos) continue;
+        try {
+            Lexer lx(src);
+            auto toks = lx.tokenize();
+            Parser p(toks);
+            Program prog = p.parseProgram();
+            for(auto& kv : prog.bundles) g_knownBundleNames.insert(kv.first);
+            if(prog.bundles.count(bundleName)) {
+                found = full;
+                break;
+            }
+        } catch(...) { continue; } // not a valid CnR file / unrelated parse error -- skip it
+    }
+    closedir(d);
+    if(found.empty())
+        throw std::runtime_error("Gather: no file defining 'Bundle " + bundleName + "' was found alongside '" + fromFile + "'");
+    return found;
+}
+
+// Forward declaration: loadBundleModule (below) recursively resolves any
+// Gather statements found inside the module it just loaded, before that
+// module is cached -- see resolveGatherStatements's definition further
+// down (after the Interpreter class, since it needs to run an Interpreter
+// to materialize gathered vars) for the full top-level driver.
+void resolveGatherStatements(Program& program, const std::string& fromFile);
+
+// Loads (parsing + caching) the file that defines `bundleName`, validating
+// that it actually contains a matching Bundle declaration and that every
+// exported function symbol resolves to something real in that file (var
+// symbols are validated later, in computeBundleModuleVars, since that
+// requires actually running the file's top-level statements).
+std::shared_ptr<BundleModule> loadBundleModule(const std::string& bundleName, const std::string& fromFile) {
+    // Fast path: `fromFile` is itself already a resolved, previously-cached
+    // module path -- this happens on every call from Interpreter::execute()'s
+    // Gather case, which passes `s->sourceFile` (set once by
+    // resolveGatherStatements to the bundle's own resolved path) rather than
+    // the original requesting file. Checking the cache by that path directly
+    // avoids re-running resolveBundleSourceFile with the bundle's own file as
+    // `fromFile`, which would incorrectly try to find some *other* file
+    // defining the same Bundle (resolveBundleSourceFile deliberately skips
+    // `fromFile` itself when scanning, since a file gathering its own Bundle
+    // makes no sense for the *original* resolution).
+    {
+        auto cached = g_bundleModuleCache.find(fromFile);
+        if(cached != g_bundleModuleCache.end() && cached->second->program.bundles.count(bundleName))
+            return cached->second;
+    }
+    std::string path = resolveBundleSourceFile(bundleName, fromFile);
+    auto it = g_bundleModuleCache.find(path);
+    if(it != g_bundleModuleCache.end()) return it->second;
+
+    if(g_bundleModulesInProgress.count(path))
+        throw std::runtime_error("Gather: circular Bundle dependency detected involving '" + path +
+                                  "' (a Bundle's source file cannot, directly or indirectly, Gather a Bundle that depends on it)");
+    g_bundleModulesInProgress.insert(path);
+
+    auto mod = std::make_shared<BundleModule>();
+    mod->sourcePath = path;
+    std::string src = loadFile(path);
+    Lexer lexer(src);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    mod->program = parser.parseProgram();
+    for(auto& kv : mod->program.bundles) g_knownBundleNames.insert(kv.first);
+
+    auto bIt = mod->program.bundles.find(bundleName);
+    if(bIt == mod->program.bundles.end()) {
+        g_bundleModulesInProgress.erase(path);
+        throw std::runtime_error("Gather: '" + path + "' does not declare 'Bundle " + bundleName + "'");
+    }
+    const BundleDecl& bundle = bIt->second;
+
+    for(auto& sym : bundle.exportedSymbols) {
+        auto fIt = mod->program.functions.find(sym);
+        if(fIt != mod->program.functions.end()) {
+            mod->exportedFunctions[bundleName + "::" + sym] = fIt->second;
+        }
+        // Not a function -- must be a top-level var; confirmed to actually
+        // exist once computeBundleModuleVars runs this module's top level.
+    }
+    // Recursively resolve any Gather statements *inside the gathered
+    // file itself* (a Bundle's source file may itself Gather other
+    // Bundles) before this module's own top-level statements are ever run,
+    // so transitive Gathers are fully rewritten first. g_bundleModulesInProgress
+    // (checked above) turns a genuine cycle into this clear error instead of
+    // unbounded recursion; wrapped in try/catch purely so the in-progress
+    // marker is always cleaned up, even when resolution below throws.
+    try {
+        resolveGatherStatements(mod->program, path);
+    } catch(...) {
+        g_bundleModulesInProgress.erase(path);
+        throw;
+    }
+    g_bundleModulesInProgress.erase(path);
+
+    g_bundleModuleCache[path] = mod;
+    return mod;
+}
+
+// Forward declaration: defined after the Interpreter class (it constructs
+// one internally to run a gathered module's top-level statements), but
+// Interpreter::execute()'s Gather case needs to call it.
+void computeBundleModuleVars(BundleModule& mod, const std::string& bundleName);
+
 class Interpreter {
 public:
     using FnTable = std::unordered_map<std::string, FunctionDecl>;
@@ -4311,6 +4823,10 @@ Value& lookupVar(const std::string& name) {
     for(auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
         if(Value* found = it->find(name)) return *found;
     }
+    if(g_knownBundleNames.count(name))
+        throw std::runtime_error("Undefined variable '" + name + "' -- did you forget to Gather it? "
+                                  "'" + name + "' is a Bundle; its symbols are only visible inside a "
+                                  "Gather(Bundle " + name + " [as Alias]) { ... } block.");
     throw std::runtime_error("Undefined variable '" + name + "'");
 }
 
@@ -4363,6 +4879,76 @@ Value& resolveVar(const std::string& name) {
     // read that must be atomic with respect to concurrent writers.
     if(slot.cex().isMutableCell) return *slot.ex().cell->payload;
     return slot;
+}
+
+// Implements `a.ref()` (see CnR_SPEC.md %2.1 and RefCallExpr's comment): a
+// shared reference/alias to `name`'s storage, using the same SharedCell
+// mechanism `mutable var` uses. Two cases:
+//
+//   - `name` is already a `mutable var` (already a SharedCell handle): the
+//     handle itself is an ordinary Value, and Value copies of a handle
+//     already alias the same cell by design (that's the whole point of
+//     `mutable`) -- so .ref() on an already-mutable array is just an
+//     ordinary copy of that handle. No new cell, no mutation of the
+//     original slot.
+//   - `name` is a plain (non-mutable) array: there is no cell yet, so this
+//     retroactively boxes the slot's current value into a brand-new
+//     SharedCell, REPLACES the original scope slot with the resulting
+//     handle (so the source variable and every future .ref() of it all
+//     share this one cell from now on), and returns a copy of that same
+//     handle for the caller to store. This is the only way to make
+//     "mutating c DOES affect a" (%2.1) possible for a variable that was
+//     never declared `mutable` in the first place.
+//
+// Either way, the returned Value is a thin handle; resolveVar()'s
+// transparent unwrap (immediately above) is what makes every existing
+// array operation on the result behave exactly like operating on the
+// original array, with no changes needed at any of those call sites.
+Value makeRefHandle(const std::string& name) {
+    Value& raw = lookupVarRaw(name);
+    if(raw.cex().isMutableCell) {
+        if(!raw.cex().cell->payload->isArray)
+            throw std::runtime_error("'" + name + "' is not an array -- .ref() is only defined for arrays");
+        raw.cex().cell->payload->ex().bareArrayCopyPendingHint = false; // seeing .ref() confirms aliasing was intended
+        return raw; // already a handle -- copy shares the same cell
+    }
+    if(!raw.isArray)
+        throw std::runtime_error("'" + name + "' is not an array -- .ref() is only defined for arrays");
+    raw.ex().bareArrayCopyPendingHint = false; // .ref() is exactly the fix the hint would have suggested
+    Value boxed = Value::makeMutableCell(std::move(raw));
+    raw = boxed; // replace the slot in place so the source aliases the same cell from now on
+    return boxed;
+}
+
+// See CnR_SPEC.md %2.1's compiler-hint note ("add a compiler hint the first
+// time a freshly bare-assigned array is mutated, suggesting .ref() if
+// aliasing was intended"). Called once, right when such a Value is created
+// (bare `var[] b = a;` or `a.clone()` -- see VarDeclStmt::arrayFromExpr's
+// execution above); NOT called for .ref() results (those are intentional
+// aliases already, nothing to warn about) or for ordinary array-literal
+// declarations (`var[] a = {1,2,3};` was never a copy of anything, so there's
+// no aliasing question to raise).
+void markBareArrayCopy(Value& v) {
+    if(v.isArray) v.ex().bareArrayCopyPendingHint = true;
+}
+
+// Called at the start of every mutating array operation (push/pop/sort/
+// reverse/index-assign/Array.delete/...) on the resolved slot. Emits a
+// one-time stderr hint the first time a freshly bare-copied array is
+// mutated, then clears the flag so the hint never repeats for this slot
+// (whether or not the person acts on it) -- this is a single nudge at the
+// moment of first mutation, not a standing warning. Written to stderr
+// (via std::cerr), separate from the program's own stdout output, so it
+// doesn't interleave with or get mistaken for the program's own print()
+// output; it never throws or blocks execution.
+void maybeWarnBareArrayMutation(Value& v, const std::string& arrayName) {
+    if(v.cex().bareArrayCopyPendingHint) {
+        v.ex().bareArrayCopyPendingHint = false;
+        std::cerr << "Hint: '" << arrayName << "' was created as an independent copy "
+                     "(bare assignment and .clone() both copy -- see CnR_SPEC.md %2.1). "
+                     "If you meant to share/alias the original array instead, use .ref(). "
+                     "(This hint is shown once per array.)\n";
+    }
 }
 
 // ---- Mutable/Mutex helpers ----
@@ -4729,6 +5315,25 @@ Value evalToValue(const ExprPtr& expr) {
     case ExprKind::ArrayMethodCall: {
         return callArrayMethod(std::static_pointer_cast<ArrayMethodCallExpr>(expr));
     }
+    case ExprKind::CloneCall: {
+        // a.clone() -- an independent copy (%2.1). resolveVar() already
+        // transparently unwraps a .ref()'d/mutable source to its live
+        // payload, and returning *that Value by value* here is an ordinary
+        // deep copy (Value has no shared/aliasing members for a plain
+        // array -- array is a plain std::vector<double>), so this is
+        // already fully independent of the source: mutating the clone can
+        // never affect the original, whether or not the original happens
+        // to be a .ref()/mutable handle itself.
+        auto c = static_cast<CloneCallExpr*>(expr.get());
+        Value& src = resolveVar(c->arrayName);
+        if(!src.isArray)
+            throw std::runtime_error("'" + c->arrayName + "' is not an array -- .clone() is only defined for arrays");
+        return src; // returned by value -- a genuine independent copy
+    }
+    case ExprKind::RefCall: {
+        auto r = static_cast<RefCallExpr*>(expr.get());
+        return makeRefHandle(r->arrayName);
+    }
     case ExprKind::StringLit:
         return Value::makeString(static_cast<StringLitExpr*>(expr.get())->value);
     case ExprKind::StringCast: {
@@ -4913,6 +5518,9 @@ Value callArrayMethod(const std::shared_ptr<ArrayMethodCallExpr>& am) {
     Value& val = resolveVar(am->arrayName);
     if(!val.isArray)
         throw std::runtime_error("'" + am->arrayName + "' is not an array");
+    bool mutates = (am->method == ArrayMethod::Push || am->method == ArrayMethod::Pop ||
+                    am->method == ArrayMethod::Sort || am->method == ArrayMethod::Reverse);
+    if(mutates) maybeWarnBareArrayMutation(val, am->arrayName);
     switch(am->method) {
     case ArrayMethod::Push: {
         Value pushed = evalToValue(am->arg);
@@ -5676,6 +6284,41 @@ void loadDatabaseFile(DatabaseInstance& db) {
 // ---- Data1.encode(...) / Data1.table.push/find/delete/insert/save/load/count(...) ----
 
 Value callDbMethod(const std::shared_ptr<DbMethodCallExpr>& dm) {
+    // Array.delete(index) -- see CnR_SPEC.md %2.2. `.delete` is already
+    // claimed by isDbMethodName() at parse time (Data tables have their own
+    // deleteWhere/delete), and since parsing dispatches purely on the
+    // method-name text (both a Data handle and a plain array are just an
+    // identifier at parse time -- there's no receiver-type information
+    // available yet), `x.delete(i)` on a plain array parses into this same
+    // DbMethodCallExpr. Checked here, before the "is this a Data instance"
+    // requirement below, by looking at what `dm->dataName` actually
+    // resolves to at runtime: if it's a plain array, this is array-element
+    // deletion, not a database operation.
+    if(dm->method == "delete" && dm->tableName.empty()) {
+        Value& maybeArray = resolveVar(dm->dataName);
+        if(maybeArray.isArray) {
+            if(dm->args.size() != 1)
+                throw std::runtime_error("Array.delete() expects exactly 1 argument (the index)");
+            double idxD = evalNumber(dm->args[0]);
+            long idx = (long)idxD;
+            if(idxD != (double)idx || idx < 0 || (size_t)idx >= maybeArray.array.size())
+                throw std::runtime_error("Array.delete(" + std::to_string(idxD) + "): index out of bounds for array '" +
+                                          dm->dataName + "' of length " + std::to_string(maybeArray.array.size()));
+            maybeWarnBareArrayMutation(maybeArray, dm->dataName);
+            // objectArray (when present) is a parallel vector<Value> kept in
+            // lockstep with `array` for struct/object elements -- see
+            // ensureObjectSlots()/Push/Pop/Reverse above. Erase from both so
+            // the two stay the same length and correctly aligned.
+            maybeArray.array.erase(maybeArray.array.begin() + idx);
+            if(maybeArray.ex().objectArray && (size_t)idx < maybeArray.ex().objectArray->size())
+                maybeArray.ex().objectArray->erase(maybeArray.ex().objectArray->begin() + idx);
+            return Value::makeNull();
+        }
+        // Not an array -- fall through to the ordinary Data-instance path
+        // below, which will give its own clear error if `dataName` isn't a
+        // Data instance either.
+    }
+
     Value& dbVal = resolveVar(dm->dataName);
     if(!dbVal.cex().isDatabase)
         throw std::runtime_error("'" + dm->dataName + "' is not a Data instance");
@@ -6385,6 +7028,35 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         runNodesWorkflow(s);
         return ExecResult::Normal;
     }
+    case StmtKind::Gather: {
+        // Gather(Bundle Name [as Alias]) { body } -- by the time this runs,
+        // resolveGatherStatements() (called once up front by runProgram())
+        // has already: loaded/parsed the Bundle's source file, merged its
+        // exported functions into this Interpreter's `functions` table
+        // under mangled "<Bundle>::<symbol>" names, and rewritten every
+        // reference to an exported symbol *inside `body`* to that mangled
+        // name. All that's left at execution time is making the exported
+        // *vars* (which aren't in a static table -- they only exist once
+        // the source file's top-level statements have actually run) visible
+        // under their mangled names too, then running body in a fresh
+        // scope so nothing gathered leaks out past this statement (%1.3:
+        // "only visible inside the lexical scope of the Gather block").
+        auto s = std::static_pointer_cast<GatherStmt>(stmt);
+        // sourceFile is always populated by resolveGatherStatements(), which
+        // runProgram() runs once over the whole Program before any
+        // execute() call -- so this always hits loadBundleModule's cache
+        // (same path key) rather than re-resolving/re-parsing anything.
+        if(s->sourceFile.empty())
+            throw std::runtime_error("Gather '" + s->bundleName + "': internal error -- statement was never resolved (resolveGatherStatements not run)");
+        auto mod = loadBundleModule(s->bundleName, s->sourceFile);
+        computeBundleModuleVars(*mod, s->bundleName);
+
+        scopes.push_back({});
+        for(auto& gv : mod->exportedVars) scopes.back()[gv.mangledName] = gv.value;
+        ExecResult r = executeBlock(s->body, returnValue);
+        scopes.pop_back();
+        return r;
+    }
     case StmtKind::Parallel: {
         auto s = static_cast<ParallelStmt*>(stmt.get());
         auto functionsCopy = functions;
@@ -6456,19 +7128,58 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         value.isArray = s->isArray;
         if(s->tensorRank >= 2) {
             value = buildTensorFromLiteral(s->nestedInit);
+        } else if(s->arrayFromExpr) {
+            // `var[] b = <expr>;` where <expr> isn't a `{...}` literal --
+            // bare assignment from another array (`var[] b = a;`),
+            // `.clone()`, `.ref()`, or an array-returning call (see
+            // parseVarDecl / CnR_SPEC.md %2.1). Whatever the expression
+            // evaluates to, it must actually be an array (or, for .ref(),
+            // an array-backed mutable-cell handle -- RefCallExpr's own
+            // evalToValue case already validated that at the source).
+            value = evalToValue(s->value);
+            bool isRefHandle = value.cex().isMutableCell;
+            if(!isRefHandle && !value.isArray)
+                throw std::runtime_error("'" + s->name + "': expected an array on the right-hand side of 'var[] " + s->name + " = ...'");
+            if(!isRefHandle) {
+                // Bare assignment / .clone() -- an ordinary independent
+                // copy, already deep since Value has no aliasing members
+                // for a plain array. See CnR_SPEC.md %2.1's compiler-hint
+                // note: markBareArrayCopy() below tags this slot so the
+                // *first* subsequent mutating operation on it can suggest
+                // .ref() if aliasing was actually intended.
+                markBareArrayCopy(value);
+            }
+            // If isRefHandle, `value` is already the .ref() handle itself
+            // (a SharedCell wrapping the aliased array) -- store it as-is
+            // below; wrapping it in *another* makeMutableCell (the
+            // s->isMutable branch) would double-box it, which is handled
+            // separately below.
         } else if(s->isArray) {
             for(auto& e : s->arrayValues) value.array.push_back(evalNumber(e));
         } else {
             value = evalToValue(s->value);
         }
         if(s->isMutable) {
-            // Box the initial value in a SharedCell; the scope slot holds
-            // only the thin handle. Any copy of this handle (thread()/
-            // Parallel{} capture, assigning it to another var, passing it
-            // as a function argument, storing it in a struct field or
-            // array of objects) shares the same cell -- see SharedCell's
-            // comment for why that's the point.
-            scopes.back()[s->name] = Value::makeMutableCell(std::move(value));
+            if(s->arrayFromExpr && value.cex().isMutableCell) {
+                // `mutable var[] b = a.ref();` -- `value` is already a
+                // handle pointing at a's cell. A `mutable` declaration's
+                // whole purpose is "the scope slot holds a handle, not the
+                // raw value" -- that's already true here, so just store the
+                // handle directly instead of boxing it in a second,
+                // unrelated cell (which would silently break the aliasing
+                // .ref() just established, and would leave the outer cell's
+                // payload holding a handle Value instead of an array Value,
+                // which resolveVar()'s single-level unwrap does not expect).
+                scopes.back()[s->name] = value;
+            } else {
+                // Box the initial value in a SharedCell; the scope slot holds
+                // only the thin handle. Any copy of this handle (thread()/
+                // Parallel{} capture, assigning it to another var, passing it
+                // as a function argument, storing it in a struct field or
+                // array of objects) shares the same cell -- see SharedCell's
+                // comment for why that's the point.
+                scopes.back()[s->name] = Value::makeMutableCell(std::move(value));
+            }
         } else {
             scopes.back()[s->name] = value;
         }
@@ -6503,6 +7214,7 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         Value& val = resolveVar(s->arrayName);
         if(!val.isArray)
             throw std::runtime_error("'" + s->arrayName + "' is not an array");
+        maybeWarnBareArrayMutation(val, s->arrayName);
         if(!s->indices.empty()) {
             if(val.dims.empty())
                 throw std::runtime_error("'" + s->arrayName + "' is not a Matrix/Tensor");
@@ -6666,20 +7378,397 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
 }
 };
 
-void runProgram(const Program& program)
+// Runs `mod`'s top-level statements to completion in an isolated
+// Interpreter to materialize its global vars, then extracts the Bundle's
+// exported var values. Isolated from the interpretation of the *requesting*
+// file entirely -- a gathered module's top-level side effects (any prints,
+// file writes, etc. it happens to have at its own top level) do run, but
+// exactly once no matter how many files Gather it (see g_bundleModuleCache),
+// matching ordinary "a module's top level runs once" semantics.
+void computeBundleModuleVars(BundleModule& mod, const std::string& bundleName) {
+    if(mod.varsComputed) return;
+    mod.varsComputed = true;
+
+    Interpreter modInterp(mod.program.functions, mod.program.structs, mod.program.datas);
+    Value discarded;
+    for(auto& stmt : mod.program.statements) modInterp.execute(stmt, discarded);
+
+    const BundleDecl& bundle = mod.program.bundles.at(bundleName);
+    Scope& g = modInterp.scopes.front();
+    for(auto& sym : bundle.exportedSymbols) {
+        if(mod.exportedFunctions.count(bundleName + "::" + sym)) continue; // already handled as a function
+        Value* v = g.find(sym);
+        if(!v)
+            throw std::runtime_error("Bundle '" + bundleName + "' exports '" + sym +
+                                      "' but no such var or function is defined in '" + mod.sourcePath + "'");
+        mod.exportedVars.push_back({bundleName + "::" + sym, *v});
+    }
+}
+
+// Rewrites every reference to a gathered symbol inside `stmt`'s subtree
+// (statement or nested block) from its surface form -- `Alias.sym` (or bare
+// `sym` when alias==bundleName, see %1.4) -- to the mangled internal name
+// "<Bundle>::<sym>" that resolveGatherStatements() installed into the
+// enclosing Program's function table / that computeBundleModuleVars()
+// stashed into the child scope Gather seeds at runtime. Only touches nodes
+// actually reachable from within a Gather body; anything outside one is
+// deliberately left alone so an ungathered `Example.sum()` still fails
+// naturally (%1.3).
+//
+// This walks the same Expr/Stmt shapes the rest of the interpreter already
+// knows about (CallExpr, VarExpr, MemberAccessExpr, BinaryExpr, ...) rather
+// than introducing a new visitor abstraction, since there is no existing
+// generic AST-walk helper in this file to hook into.
+void rewriteGatheredRefsInExpr(ExprPtr& expr, const std::string& alias, const std::string& bundleName,
+                                const std::unordered_set<std::string>& exportedNames);
+void rewriteGatheredRefsInStmt(StmtPtr& stmt, const std::string& alias, const std::string& bundleName,
+                                const std::unordered_set<std::string>& exportedNames);
+
+void rewriteGatheredRefsInBlock(const std::shared_ptr<BlockStmt>& block, const std::string& alias,
+                                 const std::string& bundleName, const std::unordered_set<std::string>& exportedNames) {
+    if(!block) return;
+    for(auto& s : block->statements) rewriteGatheredRefsInStmt(s, alias, bundleName, exportedNames);
+}
+
+void rewriteGatheredRefsInExpr(ExprPtr& expr, const std::string& alias, const std::string& bundleName,
+                                const std::unordered_set<std::string>& exportedNames) {
+    if(!expr) return;
+    switch(expr->kind) {
+    case ExprKind::Call: {
+        auto c = static_cast<CallExpr*>(expr.get());
+        // Qualified call, e.g. `Ex.sum(1,1)` -- parsed as a CallExpr whose
+        // name is literally "Ex.sum" (see parseCall's Gather-qualified-call
+        // branch). Only rewrite when the alias matches *this* Gather's
+        // alias and "sum" is actually one of its exported symbols --
+        // otherwise leave it alone (it isn't this Gather's to rewrite; some
+        // other enclosing Gather, if any, is responsible for it).
+        auto dot = c->name.find('.');
+        if(dot != std::string::npos) {
+            std::string qualifier = c->name.substr(0, dot);
+            std::string member = c->name.substr(dot + 1);
+            if(qualifier == alias && exportedNames.count(member)) {
+                c->name = bundleName + "::" + member;
+            }
+        } else if(exportedNames.count(c->name)) {
+            // Bare (unaliased) call, valid when alias == bundleName (%1.4).
+            c->name = bundleName + "::" + c->name;
+        }
+        for(auto& a : c->args) rewriteGatheredRefsInExpr(a, alias, bundleName, exportedNames);
+        break;
+    }
+    case ExprKind::Var: {
+        auto v = static_cast<VarExpr*>(expr.get());
+        if(exportedNames.count(v->name)) v->name = bundleName + "::" + v->name;
+        break;
+    }
+    case ExprKind::MemberAccess: {
+        // `Alias.sym` -- written as a MemberAccessExpr whose base is a
+        // VarExpr named exactly `alias`. Rewritten in place into a plain
+        // VarExpr (for a gathered var) or left for the enclosing CallExpr
+        // to rewrite (a MemberAccessExpr is never itself a call in this
+        // grammar -- `Ex.sum(1,1)` parses as a CallExpr, see below).
+        auto m = static_cast<MemberAccessExpr*>(expr.get());
+        if(m->base && m->base->kind == ExprKind::Var) {
+            auto baseVar = static_cast<VarExpr*>(m->base.get());
+            if(baseVar->name == alias && exportedNames.count(m->member)) {
+                expr = std::make_shared<VarExpr>(bundleName + "::" + m->member);
+                return;
+            }
+        }
+        rewriteGatheredRefsInExpr(m->base, alias, bundleName, exportedNames);
+        if(m->index) rewriteGatheredRefsInExpr(m->index, alias, bundleName, exportedNames);
+        break;
+    }
+    case ExprKind::Binary: {
+        auto b = static_cast<BinaryExpr*>(expr.get());
+        rewriteGatheredRefsInExpr(b->left, alias, bundleName, exportedNames);
+        rewriteGatheredRefsInExpr(b->right, alias, bundleName, exportedNames);
+        break;
+    }
+    case ExprKind::Unary: {
+        auto u = static_cast<UnaryExpr*>(expr.get());
+        rewriteGatheredRefsInExpr(u->expr, alias, bundleName, exportedNames);
+        break;
+    }
+    default:
+        // Every other ExprKind (literals, Thread/Join/ArrayMethodCall/...)
+        // either can't syntactically contain a bare Gather-qualified
+        // reference or is out of scope for the symbols Bundle can export
+        // (functions and vars only) -- left unchanged.
+        break;
+    }
+}
+
+void rewriteGatheredRefsInStmt(StmtPtr& stmt, const std::string& alias, const std::string& bundleName,
+                                const std::unordered_set<std::string>& exportedNames) {
+    if(!stmt) return;
+    switch(stmt->kind) {
+    case StmtKind::VarDecl: {
+        auto s = static_cast<VarDeclStmt*>(stmt.get());
+        rewriteGatheredRefsInExpr(s->value, alias, bundleName, exportedNames);
+        for(auto& e : s->arrayValues) rewriteGatheredRefsInExpr(e, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::Assign: {
+        auto s = static_cast<AssignStmt*>(stmt.get());
+        // Bare `name = expr;` where `name` is itself a gathered var (only
+        // reachable when alias == bundleName, i.e. the no-alias form --
+        // %1.4) -- rewrite the assignment target to the mangled name too,
+        // mirroring the read-side VarExpr case.
+        if(exportedNames.count(s->name)) s->name = bundleName + "::" + s->name;
+        rewriteGatheredRefsInExpr(s->value, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::MemberAssign: {
+        // `Alias.member = expr;` -- parsed as a MemberAssignStmt (the
+        // grammar this shares with ordinary struct-field assignment, since
+        // both are `ident.ident = expr`). When `objectName` matches this
+        // Gather's alias and `member` is one of its exported symbols, this
+        // is actually an assignment to the gathered var, not a struct
+        // field -- rewrite the whole statement in place into a plain
+        // AssignStmt targeting the mangled name, which is exactly how the
+        // corresponding read-side rewrite (MemberAccess -> VarExpr, see
+        // rewriteGatheredRefsInExpr) already represents a gathered var.
+        // Anything else (a real struct-field assignment, or a
+        // MemberAssign belonging to some other Gather/alias) is left
+        // untouched.
+        auto s = static_cast<MemberAssignStmt*>(stmt.get());
+        if(s->objectName == alias && !s->index && exportedNames.count(s->member)) {
+            auto rewritten = std::make_shared<AssignStmt>();
+            rewritten->name = bundleName + "::" + s->member;
+            rewritten->value = s->value;
+            rewriteGatheredRefsInExpr(rewritten->value, alias, bundleName, exportedNames);
+            stmt = rewritten;
+        } else {
+            rewriteGatheredRefsInExpr(s->value, alias, bundleName, exportedNames);
+            if(s->index) rewriteGatheredRefsInExpr(s->index, alias, bundleName, exportedNames);
+        }
+        break;
+    }
+    case StmtKind::Print: {
+        auto s = static_cast<PrintStmt*>(stmt.get());
+        rewriteGatheredRefsInExpr(s->expr, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::ExprS: {
+        auto s = static_cast<ExprStmt*>(stmt.get());
+        rewriteGatheredRefsInExpr(s->expr, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::Return: {
+        auto s = static_cast<ReturnStmt*>(stmt.get());
+        rewriteGatheredRefsInExpr(s->value, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::If: {
+        auto s = static_cast<IfStmt*>(stmt.get());
+        rewriteGatheredRefsInExpr(s->condition, alias, bundleName, exportedNames);
+        rewriteGatheredRefsInBlock(s->thenBlock, alias, bundleName, exportedNames);
+        rewriteGatheredRefsInBlock(s->elseBlock, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::While: {
+        auto s = static_cast<WhileStmt*>(stmt.get());
+        rewriteGatheredRefsInExpr(s->condition, alias, bundleName, exportedNames);
+        rewriteGatheredRefsInBlock(s->body, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::For: {
+        auto s = static_cast<ForStmt*>(stmt.get());
+        rewriteGatheredRefsInStmt(s->init, alias, bundleName, exportedNames);
+        rewriteGatheredRefsInExpr(s->condition, alias, bundleName, exportedNames);
+        rewriteGatheredRefsInStmt(s->increment, alias, bundleName, exportedNames);
+        rewriteGatheredRefsInBlock(s->body, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::Block:
+        rewriteGatheredRefsInBlock(std::static_pointer_cast<BlockStmt>(stmt), alias, bundleName, exportedNames);
+        break;
+    case StmtKind::Gather: {
+        // A different Gather nested inside this one's body (gathering some
+        // *other* Bundle, generally): this outer rewrite pass (for `alias`/
+        // `bundleName`) still needs to reach references to *its own*
+        // alias anywhere inside the nested Gather's body too, since
+        // lexical scoping means the outer alias is still visible there
+        // (e.g. `Gather(... as Math) { Gather(... as Hi) { Math.square(4) } }`).
+        // The inner Gather's *own* alias/exports are handled independently,
+        // by resolveOneGatherStmt's separate rewrite call for that inner
+        // statement -- the two passes are independent and simply both need
+        // to walk into this same body.
+        auto g = static_cast<GatherStmt*>(stmt.get());
+        rewriteGatheredRefsInBlock(g->body, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::Switch: {
+        auto s = static_cast<SwitchStmt*>(stmt.get());
+        rewriteGatheredRefsInExpr(s->subject, alias, bundleName, exportedNames);
+        for(auto& c : s->cases) {
+            rewriteGatheredRefsInExpr(c.value, alias, bundleName, exportedNames);
+            rewriteGatheredRefsInBlock(c.body, alias, bundleName, exportedNames);
+        }
+        rewriteGatheredRefsInBlock(s->defaultBody, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::TryCatch: {
+        auto s = static_cast<TryCatchStmt*>(stmt.get());
+        rewriteGatheredRefsInBlock(s->tryBlock, alias, bundleName, exportedNames);
+        rewriteGatheredRefsInBlock(s->catchBlock, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::Parallel: {
+        auto s = static_cast<ParallelStmt*>(stmt.get());
+        for(auto& block : s->blocks) rewriteGatheredRefsInBlock(block, alias, bundleName, exportedNames);
+        break;
+    }
+    case StmtKind::Nodes: {
+        auto s = std::static_pointer_cast<NodesStmt>(stmt);
+        for(auto& node : s->nodes) rewriteGatheredRefsInBlock(node.body, alias, bundleName, exportedNames);
+        break;
+    }
+    default:
+        // Every remaining statement kind (VarDecl handled above, Assign/
+        // MemberAssign handled above, Print/ExprS/Return handled above,
+        // Break, Continue, RouteDecl, ServerStart, ...) cannot lexically
+        // contain a nested statement block, so there's nothing further to
+        // walk into.
+        break;
+    }
+}
+
+// Top-level driver: walks `program`'s statement list looking for
+// GatherStmts and resolves each one (loads the target Bundle's module,
+// rewrites the Gather body's references, registers the gathered functions
+// into `program.functions` under their mangled names). `fromFile` is the
+// path of the file `program` was parsed from (needed to resolve sibling
+// Bundle files relative to it).
+// Resolves a single GatherStmt in place: loads its target Bundle module,
+// merges the module's exported functions into `program`'s function table,
+// and rewrites the Gather body's references to their mangled names. Shared
+// by resolveGatherStatements's tree walk below for every GatherStmt it
+// finds, wherever it's nested.
+void resolveOneGatherStmt(GatherStmt* g, Program& program, const std::string& fromFile) {
+    auto mod = loadBundleModule(g->bundleName, fromFile);
+    g->sourceFile = mod->sourcePath;
+
+    const BundleDecl& bundle = mod->program.bundles.at(g->bundleName);
+    std::unordered_set<std::string> exportedNames(bundle.exportedSymbols.begin(), bundle.exportedSymbols.end());
+
+    // Merge exported functions into the requesting program's own
+    // function table under their mangled names -- ordinary flat
+    // lookup (callCallable) then just finds them like any other
+    // function, no interpreter-side namespacing needed.
+    for(auto& kv : mod->exportedFunctions) program.functions[kv.first] = kv.second;
+
+    rewriteGatheredRefsInBlock(g->body, g->alias, g->bundleName, exportedNames);
+}
+
+// Recursively finds every GatherStmt reachable from `stmt` -- including
+// ones nested inside If/While/For/Switch/TryCatch bodies, or inside another
+// Gather's own body (a Gather nested inside a Gather, gathering a different
+// Bundle) -- and resolves each one via resolveOneGatherStmt. This mirrors
+// the same set of statement shapes rewriteGatheredRefsInStmt already knows
+// how to walk, since both need to reach every nested block a Gather could
+// legally appear inside.
+void findAndResolveGathersInStmt(const StmtPtr& stmt, Program& program, const std::string& fromFile) {
+    if(!stmt) return;
+    switch(stmt->kind) {
+    case StmtKind::Gather: {
+        auto g = static_cast<GatherStmt*>(stmt.get());
+        resolveOneGatherStmt(g, program, fromFile);
+        // A Gather nested inside this Gather's own body (gathering some
+        // other Bundle) is still reachable -- walk into it too.
+        if(g->body) for(auto& inner : g->body->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        break;
+    }
+    case StmtKind::Block: {
+        auto b = std::static_pointer_cast<BlockStmt>(stmt);
+        for(auto& s : b->statements) findAndResolveGathersInStmt(s, program, fromFile);
+        break;
+    }
+    case StmtKind::If: {
+        auto s = static_cast<IfStmt*>(stmt.get());
+        if(s->thenBlock) for(auto& inner : s->thenBlock->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        if(s->elseBlock) for(auto& inner : s->elseBlock->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        break;
+    }
+    case StmtKind::While: {
+        auto s = static_cast<WhileStmt*>(stmt.get());
+        if(s->body) for(auto& inner : s->body->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        break;
+    }
+    case StmtKind::For: {
+        auto s = static_cast<ForStmt*>(stmt.get());
+        findAndResolveGathersInStmt(s->init, program, fromFile);
+        findAndResolveGathersInStmt(s->increment, program, fromFile);
+        if(s->body) for(auto& inner : s->body->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        break;
+    }
+    case StmtKind::Switch: {
+        auto s = static_cast<SwitchStmt*>(stmt.get());
+        for(auto& c : s->cases) if(c.body) for(auto& inner : c.body->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        if(s->defaultBody) for(auto& inner : s->defaultBody->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        break;
+    }
+    case StmtKind::TryCatch: {
+        auto s = static_cast<TryCatchStmt*>(stmt.get());
+        if(s->tryBlock) for(auto& inner : s->tryBlock->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        if(s->catchBlock) for(auto& inner : s->catchBlock->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        break;
+    }
+    case StmtKind::Parallel: {
+        // Each Parallel{}{}... block runs on its own worker Interpreter,
+        // constructed from a *copy* of this Interpreter's `functions` table
+        // taken at the moment the Parallel statement executes (see the
+        // Parallel case in execute()). Since resolveGatherStatements() runs
+        // once, fully, over the whole Program before interpretation ever
+        // starts (see runProgram()), any Gather nested in a Parallel block
+        // is already resolved -- and its exported functions already merged
+        // into program.functions -- well before that copy is taken, so this
+        // combination works correctly with no special-casing beyond simply
+        // reaching these nested blocks in the walk.
+        auto s = static_cast<ParallelStmt*>(stmt.get());
+        for(auto& block : s->blocks) if(block) for(auto& inner : block->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        break;
+    }
+    case StmtKind::Nodes: {
+        // Same reasoning as Parallel above: each node's body runs on its
+        // own worker Interpreter built from a `functions` snapshot taken at
+        // Nodes-execution time, which is always after this whole-Program
+        // resolution pass has completed.
+        auto s = std::static_pointer_cast<NodesStmt>(stmt);
+        for(auto& node : s->nodes) if(node.body) for(auto& inner : node.body->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+        break;
+    }
+    default:
+        // Every remaining statement kind (VarDecl, Assign, Print, Return,
+        // ExprS, Break, Continue, RouteDecl, ServerStart, ...) cannot
+        // lexically contain a nested statement block the way the cases
+        // above can, so there's nothing further to walk into.
+        break;
+    }
+}
+
+void resolveGatherStatements(Program& program, const std::string& fromFile) {
+    for(auto& stmt : program.statements) findAndResolveGathersInStmt(stmt, program, fromFile);
+    // Snapshot function names before iterating: resolving a Gather nested
+    // inside one function's body can insert newly-merged gathered functions
+    // into program.functions (see resolveOneGatherStmt), which would
+    // invalidate an in-flight iterator over the same map.
+    std::vector<std::string> fnNames;
+    fnNames.reserve(program.functions.size());
+    for(auto& kv : program.functions) fnNames.push_back(kv.first);
+    for(auto& name : fnNames) {
+        auto& fn = program.functions.at(name);
+        if(fn.body) for(auto& inner : fn.body->statements) findAndResolveGathersInStmt(inner, program, fromFile);
+    }
+}
+
+void runProgram(Program& program, const std::string& fromFile)
 {
+    resolveGatherStatements(program, fromFile);
     Interpreter interpreter(program.functions, program.structs, program.datas);
     Value discardedReturn;
     for(auto& stmt : program.statements) interpreter.execute(stmt, discardedReturn);
-}
-
-std::string loadFile(const std::string& path)
-{
-    std::ifstream in(path);
-    if(!in) throw std::runtime_error("Cannot open file: " + path);
-    std::stringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
 }
 
 int main(int argc,char** argv)
@@ -6692,7 +7781,9 @@ int main(int argc,char** argv)
         auto tokens = lexer.tokenize();
         Parser parser(tokens);
         auto program = parser.parseProgram();
-        runProgram(program);
+        for(auto& kv : program.bundles) g_knownBundleNames.insert(kv.first);
+        scanDirectoryForBundleNames(argv[1]);
+        runProgram(program, argv[1]);
     }
     catch(const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

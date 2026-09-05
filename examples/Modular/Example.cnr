@@ -1,0 +1,18 @@
+// Example.cnr
+//
+// Everything in a .cnr file is private by default. The Bundle block below
+// is what makes "name" and "sum" visible to other files -- "secret" is
+// never exported, so no other file can ever reach it, Gathered or not.
+
+var name = "Ryu";
+
+function sum(var a, var b) {
+    return a + b;
+}
+
+var secret = 42;
+
+Bundle Example {
+    name;
+    sum();
+}

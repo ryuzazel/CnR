@@ -1,0 +1,33 @@
+// Main.cnr
+//
+// Run with:  CnR Main.cnr
+// (Example.cnr must sit alongside Main.cnr.)
+
+// Aliased form: Gather(Bundle Name as Alias)
+Gather(Bundle Example as Ex) {
+    var tmpname = Ex.name;
+    var x = Ex.sum(1, 1);
+    print(tmpname); // Ryu
+    print(x);       // 2
+}
+
+// No-alias form: Gather(Bundle Name)
+Gather(Bundle Example) {
+    var tmpname = name;
+    var x = sum(1, 1);
+    print(tmpname); // Ryu
+    print(x);       // 2
+}
+
+// Bare shorthand form: Gather(Name as Alias) -- the "Bundle" keyword is optional
+Gather(Example as Ex) {
+    print(Ex.sum(10, 20)); // 30
+}
+
+// Private-by-default is enforced -- uncommenting either line below fails:
+//
+//   var x = Example.name;              // Undefined variable 'Example'
+//                                      //   -- did you forget to Gather it?
+//   Gather(Bundle Example as Ex2) {
+//       print(Ex2.secret);            // Undefined variable 'Ex2'
+//   }

@@ -46,3 +46,11 @@ points.push(Example(A1,B1));
 points.push(Example(A2,B2));
 print(points[0].Distance);
 print(points[1].Distance);
+
+var[] AREF = A1.ref();
+var[] ACLONE = A1.clone();
+var[] ACLONEalias = A1;
+A1[0] = 10;
+print(ACLONE[0]);
+print(AREF[0]);
+print(ACLONEalias[0]);
