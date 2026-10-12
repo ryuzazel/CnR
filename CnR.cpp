@@ -20,9 +20,20 @@
 #include <mutex>
 #include <complex>
 #include <unordered_set>
+#include <iomanip>
+#include <sys/stat.h>
 #include <dirent.h>
+#include <climits>
+#include <cstdlib>
 #ifndef _WIN32
 #include <unistd.h>
+#include <dlfcn.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #else
 #include <direct.h>
 #define getcwd _getcwd
@@ -38,6 +49,7 @@ enum class TokType {
     MutableKw, MutexKw,
     HttpKw, HeaderKw, BodyKw,
     NodesKw, OnFailKw, RetryKw, FailKw,
+    ChunkKw, IndexKw,
     TryKw, CatchKw, ThrowKw,
     DataKw, TableKw,
     IntKw, LongKw, FloatKw, BigIntKw, BigFloatKw,
@@ -115,6 +127,7 @@ struct Lexer {
             {"mutable", TokType::MutableKw}, {"mutex", TokType::MutexKw},
             {"Sector", TokType::SectorKw},
             {"Bundle", TokType::BundleKw}, {"Gather", TokType::GatherKw}, {"as", TokType::AsKw},
+            {"Chunk", TokType::ChunkKw}, {"index", TokType::IndexKw},
         };
         return kw;
     }
@@ -252,12 +265,13 @@ enum class ExprKind {
     FloatCast, BigIntCast, BigFloatCast, StringLit, JsonObjectLit, HttpCall,
     Len, ArrayAccess, TensorAccess, Call, MemberAccess, Thread, Join, JoinAll,
     ArrayMethodCall, Fail, Throw, ServerConfig, ObjectMethodCall, DbMethodCall,
-    MutexNew, MutexMethodCall, CloneCall, RefCall
+    MutexNew, MutexMethodCall, CloneCall, RefCall,
+    GpuIndexVar, ChunkOpen, Shard
 };
 enum class StmtKind {
-    VarDecl, Assign, ArrayAssign, MemberAssign, Print, Block, If, While, For,
+    VarDecl, Assign, ArrayAssign, MemberAssign, ChainAssign, Print, Block, If, While, For,
     Return, ExprS, Parallel, Nodes, TryCatch, RouteDecl, ServerStart,
-    Break, Continue, Switch, Bundle, Gather
+    Break, Continue, Switch, Bundle, Gather, ChunkDecl
 };
 
 struct Expr { ExprKind kind; explicit Expr(ExprKind k):kind(k){} virtual ~Expr() = default; };
@@ -270,7 +284,13 @@ struct BoolExpr : Expr { bool value; BoolExpr(bool v):Expr(ExprKind::Bool),value
 struct VarExpr : Expr { std::string name; VarExpr(std::string n):Expr(ExprKind::Var),name(std::move(n)){} };
 struct UnaryExpr : Expr { TokType op; ExprPtr expr; UnaryExpr(TokType o, ExprPtr e):Expr(ExprKind::Unary),op(o),expr(std::move(e)){} };
 struct BinaryExpr : Expr { TokType op; ExprPtr left; ExprPtr right; BinaryExpr(TokType o, ExprPtr l, ExprPtr r):Expr(ExprKind::Binary),op(o),left(std::move(l)),right(std::move(r)){} };
-struct CharCastExpr : Expr { ExprPtr expr; CharCastExpr(ExprPtr e):Expr(ExprKind::CharCast),expr(std::move(e)){} };
+// (char)x      -> isArray == false: x's numeric char code (print() shows the code).
+// (char[])expr -> isArray == true : the whole char-code array `expr` turned into
+//                 a real string Value, so it can be stored, concatenated and
+//                 printed: `var t = (char[])obj.codes; print("got " + t);`
+//                 expr may be ANY array-valued expression (variable, struct
+//                 field, function result...), not just a bare identifier.
+struct CharCastExpr : Expr { ExprPtr expr; bool isArray; CharCastExpr(ExprPtr e, bool arr=false):Expr(ExprKind::CharCast),expr(std::move(e)),isArray(arr){} };
 struct StringCastExpr : Expr { ExprPtr expr; StringCastExpr(ExprPtr e):Expr(ExprKind::StringCast),expr(std::move(e)){} };
 struct IntCastExpr : Expr { ExprPtr expr; IntCastExpr(ExprPtr e):Expr(ExprKind::IntCast),expr(std::move(e)){} };
 struct LongCastExpr : Expr { ExprPtr expr; LongCastExpr(ExprPtr e):Expr(ExprKind::LongCast),expr(std::move(e)){} };
@@ -292,7 +312,18 @@ struct HttpCallExpr : Expr {
     ExprPtr bodyExpr; // null if no body{} block was given
     HttpCallExpr():Expr(ExprKind::HttpCall){}
 };
-struct LenExpr : Expr { std::string arrayName; LenExpr(std::string n):Expr(ExprKind::Len),arrayName(std::move(n)){} };
+// len(x). Two forms:
+//  - simple:  len(name)      -> arrayName set, operand null (the original form;
+//             still what Chunk(len(arr)) and the CUDA kernel emitter rely on)
+//  - general: len(<any expr>) -> operand set, arrayName empty. Lets `len` be
+//             used on struct fields (len(r.Worklist)), array elements, call
+//             results, strings, JSON objects/arrays -- e.g. directly in a
+//             `for(var i = 0; i < len(ray.Worklist); i++)` header.
+struct LenExpr : Expr {
+    std::string arrayName;
+    ExprPtr operand;
+    LenExpr(std::string n):Expr(ExprKind::Len),arrayName(std::move(n)){}
+};
 struct ArrayAccessExpr : Expr { std::string arrayName; ExprPtr index; ArrayAccessExpr(std::string n, ExprPtr i):Expr(ExprKind::ArrayAccess),arrayName(std::move(n)),index(std::move(i)){} };
 // Chained index access for Matrix/Tensor values, e.g. m[1][0] or t[0][1][2].
 // A full index (indices.size()==dims.size()) returns the scalar element; a
@@ -308,7 +339,10 @@ struct NestedArrayLitExpr {
     std::vector<std::shared_ptr<NestedArrayLitExpr>> children;
 };
 struct CallExpr : Expr { std::string name; std::vector<ExprPtr> args; CallExpr():Expr(ExprKind::Call){} };
-struct MemberAccessExpr : Expr { ExprPtr base; std::string member; ExprPtr index; MemberAccessExpr():Expr(ExprKind::MemberAccess){} };
+// `obj.field[i]` keeps using `index` (unchanged). For a Matrix/Tensor field,
+// `obj.m[i][j][k]` stores the first [..] in `index` and every following one
+// in `extraIndices`, in order.
+struct MemberAccessExpr : Expr { ExprPtr base; std::string member; ExprPtr index; std::vector<ExprPtr> extraIndices; MemberAccessExpr():Expr(ExprKind::MemberAccess){} };
 
 struct ThreadExpr : Expr { std::string fnName; std::vector<ExprPtr> args; ThreadExpr():Expr(ExprKind::Thread){} };
 struct JoinExpr : Expr { ExprPtr handleExpr; JoinExpr():Expr(ExprKind::Join){} };
@@ -340,7 +374,11 @@ struct ArrayMethodCallExpr : Expr { std::string arrayName; ArrayMethod method; E
 // bare assignment are both handled by the exact same VarDecl execution path
 // (see arrayFromExpr on VarDeclStmt), .clone() exists as an explicit,
 // self-documenting spelling of the same thing.
-struct CloneCallExpr : Expr { std::string arrayName; CloneCallExpr():Expr(ExprKind::CloneCall){} };
+// `target` != nullptr means the source is not a bare variable name but an
+// arbitrary lvalue-ish expression -- today a struct member such as
+// `obj.data.clone()` (arrayName is then unused). A bare `s.clone()` on a
+// *struct* value deep-copies its fields (see deepCloneValue).
+struct CloneCallExpr : Expr { std::string arrayName; ExprPtr target; CloneCallExpr():Expr(ExprKind::CloneCall){} };
 
 // `a.ref()` -- returns a shared reference/alias to array `a` (see
 // CnR_SPEC.md %2.1): mutating the result mutates `a` too, like C++'s
@@ -355,7 +393,25 @@ struct CloneCallExpr : Expr { std::string arrayName; CloneCallExpr():Expr(ExprKi
 // duplication. See CnR_SPEC.md %2.3: using .ref() on an array subsequently
 // used inside a Chunk/Shard body is meant to be a compile-time error --
 // not yet enforced, since Chunk/Shard don't exist in this interpreter yet.
-struct RefCallExpr : Expr { std::string arrayName; RefCallExpr():Expr(ExprKind::RefCall){} };
+struct RefCallExpr : Expr { std::string arrayName; ExprPtr target; RefCallExpr():Expr(ExprKind::RefCall){} };
+
+// `Shard(Bundle.var)` -- binds a LIVE, distributed view of a variable that a
+// Bundle exports. Plain Gather hands the gatherer a private snapshot of each
+// exported var (writes on either side never reach the other). Shard instead
+// promotes the module's own global slot to a SharedCell (the same mechanism
+// as `mutable var` / .ref()) and returns a handle to that cell: every
+// Gather body, thread, Nodes node or module function holding the handle --
+// and the module itself -- now reads and writes the SAME storage. Whoever
+// writes last wins; a dependent node that runs later simply sees the value
+// the earlier node left behind.
+//   var x   = Shard(Counter.hits);   // scalar
+//   var[] l = Shard(Counter.log);    // array
+// `target` is the (already Gather-rewritten) variable reference; it must
+// resolve to a mangled "<Bundle>::<var>" name at run time.
+// Parsed as a soft keyword (identifier `Shard` followed by `(`), so it does
+// not reserve the word -- the spec's future GPU `Shard Name(N) { ... }`
+// statement form stays unambiguous, exactly like Chunk(N) vs Chunk Name(N).
+struct ShardExpr : Expr { ExprPtr target; ShardExpr():Expr(ExprKind::Shard){} };
 
 struct VarDeclStmt : Stmt {
     bool isArray = false; bool isEmptyArray = false; std::string name; ExprPtr value; std::vector<ExprPtr> arrayValues;
@@ -391,7 +447,19 @@ struct AssignStmt : Stmt { std::string name; ExprPtr value; AssignStmt():Stmt(St
 // compatibility. indices (2+ entries) is used for Matrix/Tensor chained
 // assignment, e.g. m[1][0] = v; or t[0][1][2] = v;
 struct ArrayAssignStmt : Stmt { std::string arrayName; ExprPtr index; ExprPtr value; std::vector<ExprPtr> indices; ArrayAssignStmt():Stmt(StmtKind::ArrayAssign){} };
-struct MemberAssignStmt : Stmt { std::string objectName; std::string member; ExprPtr index; ExprPtr value; MemberAssignStmt():Stmt(StmtKind::MemberAssign){} };
+// `obj.field[i] = v;` uses `index`. `obj.m[i][j] = v;` (Matrix/Tensor field,
+// 2+ indices) leaves `index` null and fills `indices` instead -- same split
+// ArrayAssignStmt already uses.
+struct MemberAssignStmt : Stmt { std::string objectName; std::string member; ExprPtr index; std::vector<ExprPtr> indices; ExprPtr value; MemberAssignStmt():Stmt(StmtKind::MemberAssign){} };
+// `a[i].f = v;`, `a.b.c = v;`, `Alias.arr[i].f.g = v;`, `(path) = v;` -- assignment
+// to a field reached through more than one hop. `target` is a MemberAccessExpr
+// (the last hop is the field being written; everything before it is `base`).
+// Structs have reference semantics (a Value copy shares the field table), so the
+// executor evaluates `base` to the live struct and reuses the ordinary
+// MemberAssign logic on it.
+struct ChainAssignStmt : Stmt { ExprPtr target; ExprPtr value; ChainAssignStmt():Stmt(StmtKind::ChainAssign){} };
+// printCharArray + arrayName : print((char[])name);        (original fast path)
+// printCharArray + expr      : print((char[])a.b[i].field); (any array expression)
 struct PrintStmt : Stmt { bool printChar=false; bool printCharArray=false; ExprPtr expr; std::string arrayName; PrintStmt():Stmt(StmtKind::Print){} };
 struct BlockStmt : Stmt { std::vector<StmtPtr> statements; BlockStmt():Stmt(StmtKind::Block){} };
 struct IfStmt : Stmt { ExprPtr condition; std::shared_ptr<BlockStmt> thenBlock; std::shared_ptr<BlockStmt> elseBlock; IfStmt():Stmt(StmtKind::If){} };
@@ -424,6 +492,72 @@ struct SwitchStmt : Stmt {
 // bound its own concurrency (e.g. to match CPU count or a rate limit)
 // instead of always spawning one OS thread per block.
 struct ParallelStmt : Stmt { std::vector<std::shared_ptr<BlockStmt>> blocks; int maxThreads = 0; ParallelStmt():Stmt(StmtKind::Parallel){} };
+
+// --- Chunk (GPU-exclusive, CUDA-only) ---
+//
+// `Chunk` is always GPU, never a CPU thread (see CnR_SPEC.md §3). It has two
+// constructor forms that compile to the same underlying kernel type:
+//
+//   Form 1 (slot assignment): var[] Work = Chunk(N); Work[i] = taskName;
+//     -- each slot may run a DIFFERENT already-declared top-level function,
+//     assigned by bare name reference (no parens -- same "reference not
+//     call" convention as `Bundle { sum(); }`). CnR has no anonymous/
+//     first-class function literals, so Form 1 works with named function
+//     references rather than inventing a new expression kind. Compiles as
+//     sugar over Form 2 with an implicit switch(index) dispatch (spec §3.2).
+//   Form 2 (kernel block):    Chunk Work(N) { return index * index; }
+//     -- every work-item runs the SAME body, parameterized by `index`.
+//
+// Because Form 1 desugars into Form 2 (one function body per slot, dispatched
+// by index), both forms are represented by the same ChunkDecl: `kernelBody`
+// holds Form 2's single body directly, or (Form 1) the synthesized
+// switch(index) dispatch body built from each slot's referenced function at
+// parse time -- see desugarChunkForm1(). `slotFunctionNames` is kept
+// alongside for Form 1 (populated as slots are assigned, see execution),
+// but codegen always walks `kernelBody`.
+//
+// `sourceArrayName` (Form 2 array-map variant, spec §3.5) names an existing
+// array whose elements are indexed via `arr[index]` inside the kernel body;
+// empty if the Chunk doesn't map over a pre-existing array (plain N-sized
+// Chunk(N) form). Detected from `len(arrayName)` as the count expression
+// (CnR's real len() syntax -- see parseChunk()).
+//
+// A ChunkDecl is a declaration bound to a name (like a VarDecl), not a bare
+// statement: `Chunk Work(1000) { ... }` both declares `Work` as a GPU handle
+// and (per spec) does not itself block -- `.join()`/`.joinall()` are what
+// synchronize. This first cut launches eagerly at the ChunkDecl statement
+// for simplicity (§3.4 doesn't mandate lazy launch, only that sync is
+// launch-granular either way).
+struct ChunkDecl : Stmt {
+    std::string handleName;         // e.g. "Work" in `Chunk Work(1000) { ... }`
+    ExprPtr countExpr;               // the N in Chunk(N) / Chunk Work(N)
+    std::shared_ptr<BlockStmt> kernelBody; // Form 2 body, or Form 1's desugared switch(index) body
+    std::string sourceArrayName;     // non-empty if kernel body indexes an existing array via arr[index] (§3.5)
+    bool isForm1 = false;            // true if originally written as slot-assignment sugar (diagnostics only)
+    int line = 0;
+    ChunkDecl():Stmt(StmtKind::ChunkDecl){}
+};
+
+// The `index` keyword, valid only inside a Chunk/Wing/Serialize/Shard kernel
+// body (enforced by the kernel-safe-subset checker, not the parser -- the
+// parser accepts `index` anywhere an identifier-like primary expression is
+// valid and the checker rejects it outside a kernel context, matching how
+// the rest of CnR defers semantic checks out of the grammar).
+struct GpuIndexVarExpr : Expr { GpuIndexVarExpr():Expr(ExprKind::GpuIndexVar){} };
+
+// `Chunk(N)` used as a bare EXPRESSION (not the `Chunk Name(N) { ... }`
+// statement form) -- this is Form 1's opening half, spec §3.2:
+//   var[] Work = Chunk(N);
+//   Work[0] = taskA;
+// It allocates N empty slots with no kernel body yet; the body is only
+// synthesized once every slot has been assigned a function name reference
+// (see desugarChunkForm1, invoked lazily at first .join()/.joinall() on a
+// handle that has no kernelBody). Distinguished from ChunkDecl (the
+// statement form) by AST shape alone: this is an Expr appearing as
+// VarDeclStmt::value with arrayFromExpr=true, so the interpreter can tell
+// "Chunk(N) as an rvalue" apart from "Chunk Name(N) { ... }" as a statement
+// without needing a flag.
+struct ChunkOpenExpr : Expr { ExprPtr countExpr; ChunkOpenExpr():Expr(ExprKind::ChunkOpen){} };
 
 // --- DAG / Nodes workflow ---
 
@@ -469,6 +603,11 @@ struct NodesStmt : Stmt {
 struct BundleDecl {
     std::string name;
     std::vector<std::string> exportedSymbols;
+    // `Shard(n) Number;` inside a Bundle block: exports the owner's var `n`
+    // as a LIVE shared variable under the name `Number`. Key = exported
+    // name (also present in exportedSymbols), value = the owner's local var.
+    // `Shard(n);` (no alias) exports it under its own name.
+    std::unordered_map<std::string, std::string> shardAliases;
     int line = 0;
 };
 
@@ -582,6 +721,16 @@ struct FunctionDecl {
 struct StructField {
     std::string name;
     bool isArray = false;
+    // Number of [] pairs the field was declared with: 0 = scalar, 1 = plain
+    // array (`var data[];`), 2 = Matrix (`var m[][];`), 3+ = Tensor
+    // (`var t[][][];`). `var[][] m;` (brackets before the name, same style
+    // as local declarations) is accepted too and means the same thing.
+    int rank = 0;
+    // Optional default value, evaluated each time the struct is instantiated
+    // (before the constructor body runs): `var m[][] = {{1,0},{0,1}};`
+    bool hasInit = false;
+    std::vector<ExprPtr> initValues;                 // rank == 1
+    std::shared_ptr<NestedArrayLitExpr> nestedInit;  // rank >= 2
 };
 
 struct StructDecl {
@@ -624,12 +773,62 @@ struct Program {
     std::unordered_map<std::string, StructDecl> structs;
     std::unordered_map<std::string, DataDecl> datas;
     std::unordered_map<std::string, BundleDecl> bundles;
+    // Bundles referenced as `Name.sym` OUTSIDE any Gather body (direct
+    // access -- see resolveImplicitBundles). Filled by the parser from a
+    // token pre-scan; values are the resolved source paths, filled by the
+    // module-loader pass.
+    std::unordered_set<std::string> implicitBundles;
+    std::unordered_map<std::string, std::string> implicitBundlePaths;
 };
+
+bool isKnownBundleName(const std::string& n); // defined with g_knownBundleNames
 
 struct Parser {
     std::vector<Token> tokens;
     size_t pos = 0;
-    Parser(std::vector<Token> t) : tokens(std::move(t)) {}
+    // Names of known Bundles that appear as `Name .` anywhere in this file
+    // (direct access, no enclosing Gather). Treated like an always-active
+    // Gather alias by the parser, so `Name.fn(args)` parses as a qualified
+    // call; the actual resolution happens in resolveImplicitBundles().
+    std::unordered_set<std::string> implicitBundleRefs;
+    Parser(std::vector<Token> t) : tokens(std::move(t)) {
+        for(size_t i = 0; i + 1 < tokens.size(); ++i)
+            if(tokens[i].type == TokType::Ident && tokens[i+1].type == TokType::Dot && isKnownBundleName(tokens[i].text))
+                implicitBundleRefs.insert(tokens[i].text);
+    }
+
+    // Aliases (or bundle names, when no `as` clause was written) of every
+    // Gather(...) { ... } whose body is currently being parsed. Inside such a
+    // body, `Alias.name(args)` is ALWAYS a call to a gathered symbol -- it is
+    // decided here, before the built-in dotted-method tables (array methods
+    // push/pop/sort/..., Data methods find/count/get/save/..., lock/unlock,
+    // clone/ref) get a chance to claim it. Without this, a Bundle exporting a
+    // function called `find`, `count`, `get`, `sort`, `load`, ... was
+    // unreachable, because `G.find(x)` parsed as a Data-table method call.
+    std::vector<std::string> activeGatherAliases;
+    bool isGatherAlias(const std::string& n) const {
+        return std::find(activeGatherAliases.begin(), activeGatherAliases.end(), n) != activeGatherAliases.end()
+            || implicitBundleRefs.count(n) != 0;
+    }
+    // Current token is the '.' of `Alias . name (`. Builds the CallExpr whose
+    // name is encoded as "Alias.name" -- rewriteGatheredRefsInExpr (see the
+    // Bundle/Gather section) later turns that into "<Bundle>::name".
+    std::shared_ptr<CallExpr> parseQualifiedCall(const std::string& qualifier) {
+        advance(); // '.'
+        std::string calleeName = advance().text;
+        advance(); // '('
+        auto call = std::make_shared<CallExpr>();
+        call->name = qualifier + "." + calleeName;
+        if(!check(TokType::RParen)) {
+            while(true) {
+                call->args.push_back(parseExpression());
+                if(match(TokType::Comma)) continue;
+                break;
+            }
+        }
+        expect(TokType::RParen,")");
+        return call;
+    }
 
     Token& peek(int off = 0) {
         size_t p = pos + off;
@@ -818,6 +1017,12 @@ struct Parser {
     ExprPtr parseCall() {
         auto expr = parsePrimary();
         while(check(TokType::Dot)) {
+            if(auto gv = std::dynamic_pointer_cast<VarExpr>(expr)) {
+                if(isGatherAlias(gv->name) && peek(1).type == TokType::Ident && peek(2).type == TokType::LParen) {
+                    expr = parseQualifiedCall(gv->name);
+                    continue;
+                }
+            }
             if(peek(1).type == TokType::JoinKw && peek(2).type == TokType::LParen) {
                 advance(); advance(); advance(); // . join (
                 expect(TokType::RParen,")");
@@ -878,7 +1083,25 @@ struct Parser {
                     }
                     continue;
                 }
-                throw std::runtime_error("'" + peek(1).text + "()' must be called on an array name, line " + std::to_string(peek().line));
+                // `obj.data.clone()` -- clone of a struct member (an array
+                // field, or a nested struct). Only a plain `obj.field` (no
+                // [index]) qualifies; `obj.data[i].clone()` is still an error.
+                if(expr->kind == ExprKind::MemberAccess && !static_cast<MemberAccessExpr*>(expr.get())->index) {
+                    bool isClone = (peek(1).text == "clone");
+                    advance(); advance(); advance(); // . clone/ref (
+                    expect(TokType::RParen,")");
+                    if(isClone) {
+                        auto c = std::make_shared<CloneCallExpr>();
+                        c->target = expr;
+                        expr = c;
+                    } else {
+                        auto r = std::make_shared<RefCallExpr>();
+                        r->target = expr;
+                        expr = r;
+                    }
+                    continue;
+                }
+                throw std::runtime_error("'" + peek(1).text + "()' must be called on an array name or a struct field, line " + std::to_string(peek().line));
             }
             {
                 ArrayMethod m;
@@ -953,6 +1176,11 @@ struct Parser {
                 if(match(TokType::LBracket)) {
                     ma->index = parseExpression();
                     expect(TokType::RBracket,"]");
+                    // obj.m[i][j][k] -- Matrix/Tensor field access.
+                    while(match(TokType::LBracket)) {
+                        ma->extraIndices.push_back(parseExpression());
+                        expect(TokType::RBracket,"]");
+                    }
                 }
                 expr = ma;
                 continue;
@@ -965,6 +1193,33 @@ struct Parser {
         if(check(TokType::Number)) { Token t = advance(); return std::make_shared<NumberExpr>(t.number, t.text); }
         if(match(TokType::TrueKw)) return std::make_shared<BoolExpr>(true);
         if(match(TokType::FalseKw)) return std::make_shared<BoolExpr>(false);
+        // `index` -- the implicit per-work-item index inside a Chunk/Wing/
+        // Serialize/Shard kernel body (CnR_SPEC.md §3.3). Parsed anywhere an
+        // identifier-primary is valid (like `true`/`false` above); rejecting
+        // its use OUTSIDE a kernel body is a semantic check (done by
+        // KernelSafeChecker at Chunk-declaration time), not a grammar rule.
+        if(match(TokType::IndexKw)) return std::make_shared<GpuIndexVarExpr>();
+        // `Chunk(N)` as a bare expression -- Form 1's opening half (spec
+        // §3.2). Only valid here when NOT followed by an identifier + `{`,
+        // which is the ChunkDecl statement form handled by parseChunk()/
+        // parseStatement's dispatch instead.
+        if(check(TokType::ChunkKw) && peek(1).type == TokType::LParen) {
+            advance(); // 'Chunk'
+            expect(TokType::LParen,"(");
+            auto co = std::make_shared<ChunkOpenExpr>();
+            co->countExpr = parseExpression();
+            expect(TokType::RParen,")");
+            return co;
+        }
+        // `Shard(Bundle.var)` -- soft keyword, see ShardExpr.
+        if(check(TokType::Ident) && peek().text == "Shard" && peek(1).type == TokType::LParen) {
+            advance(); // 'Shard'
+            expect(TokType::LParen,"(");
+            auto sh = std::make_shared<ShardExpr>();
+            sh->target = parseExpression();
+            expect(TokType::RParen,")");
+            return sh;
+        }
         if(match(TokType::MutexKw)) {
             expect(TokType::LParen,"(");
             expect(TokType::RParen,")");
@@ -974,6 +1229,13 @@ struct Parser {
             expect(TokType::LParen,"(");
             auto t = std::make_shared<ThreadExpr>();
             t->fnName = expect(TokType::Ident,"function name").text;
+            // thread(Alias.fn, args...) / thread(Alias.fn(args)) -- a function
+            // gathered under an alias. Encoded "Alias.fn"; the Gather rewrite
+            // pass turns it into "<Bundle>::fn" like any other qualified name.
+            if(isGatherAlias(t->fnName) && check(TokType::Dot) && peek(1).type == TokType::Ident) {
+                advance(); // '.'
+                t->fnName += "." + advance().text;
+            }
             if(match(TokType::LParen)) {
                 if(!check(TokType::RParen)) {
                     while(true) {
@@ -1010,9 +1272,10 @@ struct Parser {
                 if(match(TokType::LBracket)) {
                     expect(TokType::RBracket,"]");
                     expect(TokType::RParen,")");
-                    auto id = expect(TokType::Ident,"identifier");
-                    auto p = std::make_shared<ArrayAccessExpr>(id.text, nullptr);
-                    return std::make_shared<CharCastExpr>(p);
+                    // Any array-valued expression, e.g. (char[])Competitors[best].CurrentGuess
+                    // (parseUnary -> parseCall handles the whole .member[i] chain).
+                    auto e = parseUnary();
+                    return std::make_shared<CharCastExpr>(e, /*isArray=*/true);
                 }
                 expect(TokType::RParen,")");
                 auto e = parseUnary();
@@ -1081,9 +1344,17 @@ struct Parser {
         }
         if(match(TokType::LenKw)) {
             expect(TokType::LParen,"(");
-            auto id = expect(TokType::Ident,"identifier");
+            // Fast path: plain `len(name)` keeps the original representation.
+            if(check(TokType::Ident) && peek(1).type == TokType::RParen) {
+                auto id = expect(TokType::Ident,"identifier");
+                expect(TokType::RParen,")");
+                return std::make_shared<LenExpr>(id.text);
+            }
+            // General path: len(<expression>)
+            auto lenGeneral = std::make_shared<LenExpr>(std::string());
+            lenGeneral->operand = parseExpression();
             expect(TokType::RParen,")");
-            return std::make_shared<LenExpr>(id.text);
+            return lenGeneral;
         }
         if(match(TokType::FailKw)) {
             expect(TokType::LParen,"(");
@@ -1197,7 +1468,11 @@ struct Parser {
             expect(TokType::RBracket,"]");
             expect(TokType::RParen,")");
             stmt->printCharArray=true;
-            stmt->arrayName= expect(TokType::Ident,"identifier").text;
+            if(check(TokType::Ident) && peek(1).type==TokType::RParen) {
+                stmt->arrayName = advance().text;          // print((char[])name);
+            } else {
+                stmt->expr = parseUnary();                  // print((char[])obj.field[i]);
+            }
             expect(TokType::RParen,")");
             expect(TokType::Semicolon,";");
             return stmt;
@@ -1346,7 +1621,63 @@ struct Parser {
         return stmt;
     }
 
+    // Recognizes (by token look-ahead, nothing is consumed unless it matches) an
+    // assignment whose target is a multi-hop path the older single-hop forms
+    // (`x = v`, `x[i] = v`, `x.m = v`, `x.m[i] = v`, `x.m[i][j] = v`) cannot express:
+    //   a[i].f = v;   a.b.c = v;   a.b[i].c.d = v;   (a.b.c) = v;
+    StmtPtr tryParseChainAssign(bool consumeSemicolon) {
+        const size_t n = tokens.size();
+        size_t i = pos;
+        bool paren = false;
+        if(i < n && tokens[i].type == TokType::LParen) {
+            paren = true;
+            int depth = 0; size_t j = i;
+            for(; j < n; ++j) {
+                if(tokens[j].type == TokType::LParen) depth++;
+                else if(tokens[j].type == TokType::RParen) { if(--depth == 0) break; }
+                else if(tokens[j].type == TokType::End) return nullptr;
+            }
+            if(j + 1 >= n || tokens[j + 1].type != TokType::Assign) return nullptr;
+        } else {
+            if(i >= n || tokens[i].type != TokType::Ident) return nullptr;
+            size_t j = i + 1;
+            int dots = 0; bool sawIndex = false, dotAfterIndex = false;
+            while(j < n) {
+                if(tokens[j].type == TokType::Dot && j + 1 < n && tokens[j + 1].type == TokType::Ident) {
+                    dots++; if(sawIndex) dotAfterIndex = true; j += 2;
+                } else if(tokens[j].type == TokType::LBracket) {
+                    int d = 0;
+                    for(; j < n; ++j) {
+                        if(tokens[j].type == TokType::LBracket) d++;
+                        else if(tokens[j].type == TokType::RBracket) { if(--d == 0) break; }
+                        else if(tokens[j].type == TokType::End) return nullptr;
+                    }
+                    if(j >= n) return nullptr;
+                    j++; sawIndex = true;
+                } else break;
+            }
+            if(j >= n || tokens[j].type != TokType::Assign) return nullptr;
+            if(!(dots >= 2 || dotAfterIndex)) return nullptr; // single-hop forms keep their own path
+        }
+        auto stmt = std::make_shared<ChainAssignStmt>();
+        if(paren) {
+            advance(); // (
+            stmt->target = parseExpression();
+            expect(TokType::RParen, ")");
+        } else {
+            stmt->target = parseExpression();
+        }
+        if(!stmt->target || stmt->target->kind != ExprKind::MemberAccess)
+            throw std::runtime_error("Invalid assignment target, line " + std::to_string(peek().line) +
+                                      " (expected something like a[i].field = v; or a.b.c = v;)");
+        expect(TokType::Assign, "=");
+        stmt->value = parseExpression();
+        if(consumeSemicolon) expect(TokType::Semicolon, ";");
+        return stmt;
+    }
+
     StmtPtr parseAssignmentStatement(bool consumeSemicolon = true) {
+        if(auto chain = tryParseChainAssign(consumeSemicolon)) return chain;
         auto id= expect(TokType::Ident,"identifier");
         if(check(TokType::LParen)) {
             advance();
@@ -1366,6 +1697,17 @@ struct Parser {
             return stmt;
         }
         if(check(TokType::Dot)) {
+            // `Alias.name(args);` as a bare statement inside a Gather body
+            // (see activeGatherAliases above). Checked first so a gathered
+            // function named like a built-in method (find, count, push,
+            // start, ...) is never mistaken for one.
+            if(isGatherAlias(id.text) && peek(1).type == TokType::Ident && peek(2).type == TokType::LParen) {
+                auto call = parseQualifiedCall(id.text);
+                if(consumeSemicolon) expect(TokType::Semicolon,";");
+                auto stmt = std::make_shared<ExprStmt>();
+                stmt->expr = call;
+                return stmt;
+            }
             // server.GET("/path") { ... }; -- route declaration.
             // Recognized by an HTTP-verb identifier immediately followed by '(' and,
             // after the matching ')', a '{' -- this shape never collides with
@@ -1499,8 +1841,18 @@ struct Parser {
             stmt->objectName = id.text;
             stmt->member = expect(TokType::Ident,"member name").text;
             if(match(TokType::LBracket)) {
-                stmt->index = parseExpression();
+                ExprPtr first = parseExpression();
                 expect(TokType::RBracket,"]");
+                if(check(TokType::LBracket)) {
+                    // obj.m[i][j] = v; -- Matrix/Tensor field element assignment.
+                    stmt->indices.push_back(first);
+                    while(match(TokType::LBracket)) {
+                        stmt->indices.push_back(parseExpression());
+                        expect(TokType::RBracket,"]");
+                    }
+                } else {
+                    stmt->index = first;
+                }
             }
             expect(TokType::Assign,"=");
             stmt->value=parseExpression();
@@ -1674,6 +2026,45 @@ struct Parser {
         return stmt;
     }
 
+    // --- Chunk (CnR_SPEC.md §3) ---
+    //
+    // Two surface forms, both producing a ChunkDecl:
+    //
+    //   Form 2 (kernel block):  Chunk Work(1000) { return index * index; }
+    //   Form 1 (slot assign):   var[] Work = Chunk(N); Work[i] = taskName;
+    //
+    // Form 1 is NOT parsed here directly -- `var[] Work = Chunk(N);` parses
+    // through the ordinary VarDecl path (Chunk(N) as a ChunkOpenExpr
+    // primary), and each `Work[i] = taskName;` parses through the ordinary
+    // array-assign path (taskName being a bare VarExpr referencing an
+    // already-declared function, per §3.2). Both produce ordinary AST
+    // nodes; what makes it "Form 1" only becomes visible when the
+    // interpreter later notices a variable was declared via a bare
+    // `Chunk(N)` call (no attached kernel block) -- see execution near
+    // ChunkHandle::isForm1. This keeps the parser simple: it doesn't need
+    // lookahead across multiple statements to recognize Form 1, only Form 2
+    // needs a dedicated parse function because only Form 2 has `Chunk`
+    // immediately followed by a `{ }` body in the same statement.
+    StmtPtr parseChunk() {
+        int declLine = peek().line;
+        expect(TokType::ChunkKw,"Chunk");
+        auto decl = std::make_shared<ChunkDecl>();
+        decl->line = declLine;
+        decl->handleName = expect(TokType::Ident,"Chunk handle name").text;
+        expect(TokType::LParen,"(");
+        decl->countExpr = parseExpression();
+        expect(TokType::RParen,")");
+        decl->kernelBody = parseBlock();
+        // Detect the array-map variant (spec §3.5): the count expression is
+        // `len(<arrayName>)` (CnR's real len() syntax -- a global function,
+        // not a `.len()` method), meaning the kernel indexes that same
+        // array via arr[index].
+        if(auto lenCall = std::dynamic_pointer_cast<LenExpr>(decl->countExpr)) {
+            if(!lenCall->operand) decl->sourceArrayName = lenCall->arrayName;
+        }
+        return decl;
+    }
+
     NodeDecl parseNodeDecl() {
         NodeDecl node;
         node.name = expect(TokType::Ident,"node name").text;
@@ -1718,6 +2109,20 @@ struct Parser {
             if(check(TokType::End))
                 throw std::runtime_error("Unexpected end of file inside Bundle '" + bd.name + "'");
             std::string sym = expect(TokType::Ident,"exported symbol name").text;
+            // `Shard(localVar) Alias;` / `Shard(localVar);` -- soft keyword, told
+            // apart from an exported function that happens to be called Shard
+            // (`Shard();`) by the identifier right after the `(`.
+            if(sym == "Shard" && check(TokType::LParen) && peek(1).type == TokType::Ident) {
+                advance(); // (
+                std::string local = expect(TokType::Ident,"variable name inside Shard(...)").text;
+                expect(TokType::RParen,")");
+                std::string alias = local;
+                if(check(TokType::Ident)) alias = advance().text;
+                expect(TokType::Semicolon,";");
+                bd.shardAliases[alias] = local;
+                bd.exportedSymbols.push_back(alias);
+                continue;
+            }
             if(match(TokType::LParen)) expect(TokType::RParen,")"); // optional `()` marker, discarded
             expect(TokType::Semicolon,";");
             bd.exportedSymbols.push_back(sym);
@@ -1745,7 +2150,10 @@ struct Parser {
             stmt->alias = expect(TokType::Ident,"alias name").text;
         }
         expect(TokType::RParen,")");
-        stmt->body = parseBlock();
+        activeGatherAliases.push_back(stmt->alias);
+        try { stmt->body = parseBlock(); }
+        catch(...) { activeGatherAliases.pop_back(); throw; }
+        activeGatherAliases.pop_back();
         return stmt;
     }
 
@@ -1855,6 +2263,7 @@ struct Parser {
         if(check(TokType::For)) return parseFor();
         if(check(TokType::Return)) return parseReturn();
         if(check(TokType::Parallel)) return parseParallel();
+        if(check(TokType::ChunkKw)) return parseChunk();
         if(check(TokType::NodesKw)) return parseNodes();
         if(check(TokType::GatherKw)) return parseGather();
         if(check(TokType::TryKw)) return parseTryCatch();
@@ -1873,6 +2282,7 @@ struct Parser {
             expect(TokType::Semicolon,";");
             return stmt;
         }
+        if(check(TokType::LParen)) { if(auto chain = tryParseChainAssign(true)) return chain; }
         if(check(TokType::Ident)) return parseAssignmentStatement();
         throw std::runtime_error("Unexpected statement on line " + std::to_string(peek().line));
     }
@@ -1885,7 +2295,9 @@ struct Parser {
         if(!check(TokType::RParen)) {
             while(true) {
                 expect(TokType::Var,"'var' before parameter name");
+                consumeBracketPairs(); // `var[] a` -- array-typed hint, params are untyped
                 fn.params.push_back(expect(TokType::Ident,"parameter name").text);
+                consumeBracketPairs(); // `var a[]`
                 if(match(TokType::Comma)) continue;
                 break;
             }
@@ -1906,11 +2318,40 @@ struct Parser {
                 throw std::runtime_error("Unexpected end of file inside struct '" + sd.name + "'");
             if(check(TokType::Var)) {
                 advance();
+                // Field declaration. All of these are accepted:
+                //   var x;                 scalar
+                //   var data[];  var[] data;           1-D array
+                //   var m[][];   var[][] m;            Matrix  (rank 2)
+                //   var t[][][]; var[][][] t;          Tensor  (rank 3+)
+                // optionally followed by `= {literal}` for rank >= 1, e.g.
+                //   var m[][] = {{1,0},{0,1}};
+                int prefixRank = consumeBracketPairs();
                 std::string fname = expect(TokType::Ident,"field name").text;
-                bool isArr = false;
-                if(match(TokType::LBracket)) { expect(TokType::RBracket,"]"); isArr = true; }
+                int suffixRank = consumeBracketPairs();
+                if(prefixRank > 0 && suffixRank > 0)
+                    throw std::runtime_error("Field '" + fname + "' of struct '" + sd.name + "' puts [] both before and after its name, line " + std::to_string(peek().line));
+                StructField f;
+                f.name = fname;
+                f.rank = prefixRank + suffixRank;
+                f.isArray = f.rank >= 1;
+                if(f.isArray && match(TokType::Assign)) {
+                    f.hasInit = true;
+                    if(f.rank >= 2) {
+                        f.nestedInit = parseNestedArrayLit(f.rank);
+                    } else {
+                        expect(TokType::LBrace,"{");
+                        if(!check(TokType::RBrace)) {
+                            while(true) {
+                                f.initValues.push_back(parseExpression());
+                                if(match(TokType::Comma)) continue;
+                                break;
+                            }
+                        }
+                        expect(TokType::RBrace,"}");
+                    }
+                }
                 expect(TokType::Semicolon,";");
-                sd.fields.push_back({fname, isArr});
+                sd.fields.push_back(std::move(f));
                 continue;
             }
             if(check(TokType::Ident) && peek().text == sd.name) {
@@ -1919,7 +2360,9 @@ struct Parser {
                 if(!check(TokType::RParen)) {
                     while(true) {
                         expect(TokType::Var,"'var' before parameter name");
+                        consumeBracketPairs(); // `var[] src` -- array-typed hint, params are untyped
                         sd.ctorParams.push_back(expect(TokType::Ident,"parameter name").text);
+                        consumeBracketPairs(); // `var src[]`
                         if(match(TokType::Comma)) continue;
                         break;
                     }
@@ -2040,6 +2483,8 @@ struct Parser {
         while(!check(TokType::End)) {
             parseTopLevelInto(prog);
         }
+        for(auto& n : implicitBundleRefs)
+            if(!prog.bundles.count(n)) prog.implicitBundles.insert(n); // a file's own Bundle is never "implicit"
         return prog;
     }
 };
@@ -2475,6 +2920,30 @@ enum class NumKind { Plain, F32, I32, I64, BigF, Big };
 // them combined.
 struct Value; // forward declaration: ValueExtra holds containers of Value
 
+// Runtime state for a Chunk GPU handle (CnR_SPEC.md §3). One ChunkHandle is
+// created when a `Chunk Work(N) { ... }` / `var[] Work = Chunk(N)` statement
+// executes; it lives for the lifetime of the handle's Value (shared_ptr, so
+// copies of the handle share the same underlying GPU launch/result state --
+// mirrors how ThreadRecord/ServerInstance etc. are shared across Value
+// copies elsewhere in this file).
+struct ChunkHandle {
+    long long n = 0;                  // work-item count N
+    std::string kernelHash;           // content-hash of the generated CUDA source; identifies the .cnr_cache/<hash>.so
+    void* dlHandle = nullptr;         // dlopen() handle for the compiled .so backing this kernel
+    std::vector<double> results;      // device-to-host copied results, valid once resultReady
+    bool resultReady = false;
+    bool launchFailed = false;        // true if nvcc/dlopen/launch failed; .join()/.joinall() rethrow at that point
+    std::string launchError;          // human-readable error captured at launch time
+    std::mutex syncMtx;               // guards concurrent .join()/.joinall() on the same handle from different CPU threads
+    // Form 1 support: populated as `Work[i] = taskName;` assignments run,
+    // before the kernel body has been synthesized. Empty (and unused) for
+    // Form 2 handles, which get their kernelBody directly from the ChunkDecl
+    // AST and launch immediately without needing this.
+    std::vector<std::string> pendingSlotFunctionNames;
+    bool isForm1 = false;
+    bool kernelBodyBuilt = false; // true once desugarChunkForm1 has synthesized+launched Form 1's kernel (guards against redundant re-synthesis on a second .join()/.joinall())
+};
+
 // Backing store for a `mutable var` binding (see VarDeclStmt::isMutable).
 // One SharedCell is allocated at declaration time; every Value copy derived
 // from that variable (thread()/Parallel{} capture, struct field, array
@@ -2526,6 +2995,12 @@ struct ValueExtra {
     // `mutable var` values: isMutableCell + cell. See SharedCell above.
     bool isMutableCell = false;
     std::shared_ptr<SharedCell> cell;
+    // True on a handle produced by Shard(Bundle.var). Such a handle usually
+    // lives in a Gather body's child scope, which thread()/Parallel{}
+    // snapshots would otherwise not capture (see snapshotGlobalScope) --
+    // the flag lets them carry it into the worker so the worker shares the
+    // same distributed variable instead of failing with "Undefined variable".
+    bool isShardHandle = false;
 
     // Set on an array Value the moment it's produced by bare assignment or
     // .clone() (see markBareArrayCopy/VarDeclStmt::arrayFromExpr and
@@ -2536,6 +3011,17 @@ struct ValueExtra {
     // functional/semantic weight (the copy already happened correctly
     // either way).
     bool bareArrayCopyPendingHint = false;
+
+    // ---- GPU / Chunk handle (CnR_SPEC.md §3) ----
+    // Set on the Value bound to a Chunk's handle name (`Work` in
+    // `Chunk Work(1000) { ... }`). Carries everything needed to launch the
+    // compiled kernel and later retrieve results via .join()/.joinall() --
+    // both of which dispatch to the Chunk path (instead of the pre-existing
+    // thread-array join path) purely by checking isChunk on the handle's
+    // Value at eval time (see JoinExpr/JoinAllExpr evaluation). No new AST
+    // nodes needed for join/joinall; see the ChunkDecl comment for why.
+    bool isChunk = false;
+    std::shared_ptr<struct ChunkHandle> chunkHandle;
 };
 
 struct Value {
@@ -2733,6 +3219,40 @@ std::string valueToDisplayString(const Value& v) {
     if(v.number == (long long)v.number) oss << (long long)v.number;
     else oss << v.number;
     return oss.str();
+}
+
+// ---- char code -> text helpers (used by (char[])expr and (string)(char)x) ----
+// Codes 0..255 are emitted as a single raw byte, exactly like print((char[])a)
+// always did, so existing output is unchanged. Codes above 255 are encoded as
+// UTF-8 so a code point such as 233 -> byte, 8364 -> the euro sign works too.
+inline std::string charCodeToString(double code) {
+    if(code != code || code < 0 || code > 0x10FFFF)
+        throw std::runtime_error("(char): invalid character code " + std::to_string(code));
+    unsigned long c = (unsigned long)code;
+    std::string out;
+    if(c < 256) { out += (char)c; return out; }
+    if(c < 0x800) { out += (char)(0xC0 | (c >> 6)); out += (char)(0x80 | (c & 0x3F)); return out; }
+    if(c < 0x10000) { out += (char)(0xE0 | (c >> 12)); out += (char)(0x80 | ((c >> 6) & 0x3F)); out += (char)(0x80 | (c & 0x3F)); return out; }
+    out += (char)(0xF0 | (c >> 18)); out += (char)(0x80 | ((c >> 12) & 0x3F));
+    out += (char)(0x80 | ((c >> 6) & 0x3F)); out += (char)(0x80 | (c & 0x3F));
+    return out;
+}
+// Turns an array Value of char codes into a string. A string Value passes
+// through unchanged; a `mutable` array is read under its cell lock.
+inline std::string charCodesToString(const Value& vIn) {
+    if(vIn.cex().isMutableCell) {
+        auto cell = vIn.cex().cell;
+        if(!cell || !cell->payload) return "";
+        std::lock_guard<std::mutex> lock(cell->mtx);
+        return charCodesToString(*cell->payload);
+    }
+    if(vIn.isString) return vIn.str;
+    if(!vIn.isArray)
+        throw std::runtime_error("(char[]) expects an array of character codes");
+    std::string out;
+    out.reserve(vIn.array.size());
+    for(double c : vIn.array) out += charCodeToString(c);
+    return out;
 }
 
 // Generic "==" for two Values, used by BinaryExpr EqualEqual/BangEqual so
@@ -3358,6 +3878,7 @@ struct NodeFailSignal {};
 struct CnrThrowSignal { std::string message; };
 
 #include <thread>
+#include <chrono>
 
 #include <future>
 #include <atomic>
@@ -3575,6 +4096,11 @@ void serializeJsonInto(std::ostringstream& oss, const Value& v) {
             }
             oss << '}';
         }
+        return;
+    }
+    if(v.isArray && v.dims.size() >= 2) {
+        // Matrix/Tensor: nested brackets matching its shape, e.g. [[1,2],[3,4]]
+        oss << tensorToDisplayString(v);
         return;
     }
     if(v.isArray) {
@@ -3827,6 +4353,239 @@ inline HttpRawResponse performHttpRequest(const std::string& method, const std::
         close(fd);
         throw;
     }
+}
+
+// ============================================================================
+// llama.cpp integration.
+//
+// CnR talks to llama.cpp through `llama-server` (the official HTTP server that
+// ships with llama.cpp, OpenAI-compatible API, plain HTTP -- which is exactly
+// what the raw-socket client above supports; no TLS needed on localhost).
+//
+//   llamaStart(model.gguf [, port=8080 [, "extra llama-server flags" [, timeoutSec=180]]])
+//        spawns llama-server, waits until /health says the model is loaded.
+//        Binary: $LLAMA_SERVER_BIN, else `llama-server` from PATH.
+//        Its output goes to llama-server.log. It is killed when CnR exits.
+//   llamaConnect("http://host:port")   use a llama-server that is already running
+//   llamaAsk(prompt [, system [, maxTokens=512 [, temperature=0.3]]])  -> string
+//        If neither Start nor Connect was called: $LLAMA_SERVER_URL, else
+//        http://127.0.0.1:8080.
+//   llamaRunning()  -> bool     llamaStop()  -> bool
+// ============================================================================
+
+struct LlamaState {
+    std::mutex mtx;
+    std::string baseUrl;   // e.g. "http://127.0.0.1:8080" (empty = not configured yet)
+    long childPid = -1;    // pid of a llama-server WE spawned (-1 = none)
+};
+inline LlamaState& llamaState() { static LlamaState st; return st; }
+
+inline std::string llamaJsonEscape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() + 8);
+    for(unsigned char c : in) {
+        switch(c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if(c < 0x20) { char b[8]; std::snprintf(b, sizeof b, "\\u%04x", c); out += b; }
+                else out += (char)c;
+        }
+    }
+    return out;
+}
+
+inline std::string llamaNormalizeUrl(std::string u) {
+    while(!u.empty() && std::isspace((unsigned char)u.back())) u.pop_back();
+    while(!u.empty() && u.back() == '/') u.pop_back();
+    if(u.empty()) return u;
+    bool allDigits = true;
+    for(char c : u) if(!std::isdigit((unsigned char)c)) { allDigits = false; break; }
+    if(allDigits) return "http://127.0.0.1:" + u;           // "8081"
+    if(u.find("://") == std::string::npos) u = "http://" + u; // "localhost:8081"
+    return u;
+}
+
+// true when GET <base>/health answers 200 (model loaded and ready)
+inline bool llamaHealthOk(const std::string& base) {
+    try {
+        HttpRawResponse r = performHttpRequest("GET", base + "/health", {}, "");
+        return r.status == 200;
+    } catch(...) { return false; }
+}
+
+#ifndef _WIN32
+inline bool llamaChildAlive(long pid) {
+    if(pid <= 0) return false;
+    int st = 0;
+    pid_t r = waitpid((pid_t)pid, &st, WNOHANG);
+    return r == 0; // 0 = still running; pid = already exited; -1 = not ours/gone
+}
+#endif
+
+inline bool llamaStopServer() {
+    LlamaState& L = llamaState();
+    long pid;
+    {
+        std::lock_guard<std::mutex> lock(L.mtx);
+        pid = L.childPid;
+        L.childPid = -1;
+        L.baseUrl.clear();
+    }
+#ifndef _WIN32
+    if(pid > 0) {
+        kill((pid_t)pid, SIGTERM);
+        for(int i = 0; i < 50; ++i) { // up to ~5s for a clean exit
+            int st = 0;
+            if(waitpid((pid_t)pid, &st, WNOHANG) != 0) return true;
+            usleep(100 * 1000);
+        }
+        kill((pid_t)pid, SIGKILL);
+        int st = 0; waitpid((pid_t)pid, &st, 0);
+        return true;
+    }
+#endif
+    return pid > 0;
+}
+
+inline void llamaAtExit() { llamaStopServer(); }
+
+inline void llamaConnectServer(const std::string& url) {
+    std::string base = llamaNormalizeUrl(url);
+    if(base.empty()) throw std::runtime_error("llamaConnect(): empty URL");
+    if(base.rfind("https://", 0) == 0)
+        throw std::runtime_error("llamaConnect(): https:// is not supported (no TLS); run llama-server on http://");
+    if(!llamaHealthOk(base))
+        throw std::runtime_error("llamaConnect(): no ready llama-server at " + base +
+                                 " (start one with: llama-server -m model.gguf --port N)");
+    LlamaState& L = llamaState();
+    std::lock_guard<std::mutex> lock(L.mtx);
+    L.baseUrl = base;
+}
+
+inline void llamaStartServer(const std::string& model, int port, const std::string& extraArgs, int timeoutSec) {
+#ifdef _WIN32
+    (void)model; (void)port; (void)extraArgs; (void)timeoutSec;
+    throw std::runtime_error("llamaStart(): not supported on Windows builds; start llama-server yourself and use llamaConnect()");
+#else
+    {
+        std::ifstream f(model, std::ios::binary);
+        if(!f) throw std::runtime_error("llamaStart(): model file not found: " + model);
+    }
+    if(port < 1 || port > 65535) throw std::runtime_error("llamaStart(): invalid port " + std::to_string(port));
+    llamaStopServer(); // one managed server at a time
+
+    const char* envBin = std::getenv("LLAMA_SERVER_BIN");
+    std::string bin = (envBin && *envBin) ? envBin : "llama-server";
+
+    std::vector<std::string> args = { bin, "-m", model, "--host", "127.0.0.1", "--port", std::to_string(port) };
+    {
+        std::istringstream ss(extraArgs);
+        std::string tok;
+        while(ss >> tok) args.push_back(tok);
+    }
+    std::vector<char*> argv;
+    for(auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    int logfd = ::open("llama-server.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+    pid_t pid = fork();
+    if(pid < 0) {
+        if(logfd >= 0) ::close(logfd);
+        throw std::runtime_error("llamaStart(): fork() failed");
+    }
+    if(pid == 0) { // child: only async-signal-safe calls until exec
+#ifdef __linux__
+        prctl(PR_SET_PDEATHSIG, SIGTERM); // die with the parent, even on a crash
+#endif
+        if(logfd >= 0) { dup2(logfd, 1); dup2(logfd, 2); ::close(logfd); }
+        execvp(argv[0], argv.data());
+        _exit(127);
+    }
+    if(logfd >= 0) ::close(logfd);
+
+    static std::once_flag once;
+    std::call_once(once, []{ std::atexit(llamaAtExit); });
+
+    std::string base = "http://127.0.0.1:" + std::to_string(port);
+    {
+        LlamaState& L = llamaState();
+        std::lock_guard<std::mutex> lock(L.mtx);
+        L.childPid = (long)pid;
+        L.baseUrl = base;
+    }
+
+    if(timeoutSec < 1) timeoutSec = 180;
+    for(int waited = 0; waited < timeoutSec * 4; ++waited) {
+        int st = 0;
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if(r == pid) { // the process died before becoming ready
+            {
+                LlamaState& L = llamaState();
+                std::lock_guard<std::mutex> lock(L.mtx);
+                L.childPid = -1; L.baseUrl.clear();
+            }
+            if(WIFEXITED(st) && WEXITSTATUS(st) == 127)
+                throw std::runtime_error("llamaStart(): could not execute '" + bin + "' (is llama.cpp's llama-server in PATH? or set LLAMA_SERVER_BIN)");
+            throw std::runtime_error("llamaStart(): llama-server exited during startup (see llama-server.log)");
+        }
+        if(llamaHealthOk(base)) return;
+        usleep(250 * 1000);
+    }
+    llamaStopServer();
+    throw std::runtime_error("llamaStart(): timeout (" + std::to_string(timeoutSec) + "s) waiting for the model to load (see llama-server.log)");
+#endif
+}
+
+inline std::string llamaChat(const std::string& prompt, const std::string& system, int maxTokens, double temperature) {
+    std::string base;
+    {
+        LlamaState& L = llamaState();
+        std::lock_guard<std::mutex> lock(L.mtx);
+        if(L.baseUrl.empty()) {
+            const char* envUrl = std::getenv("LLAMA_SERVER_URL");
+            L.baseUrl = llamaNormalizeUrl((envUrl && *envUrl) ? envUrl : "http://127.0.0.1:8080");
+        }
+        base = L.baseUrl;
+    }
+    std::ostringstream body;
+    body << "{\"messages\":[";
+    if(!system.empty())
+        body << "{\"role\":\"system\",\"content\":\"" << llamaJsonEscape(system) << "\"},";
+    body << "{\"role\":\"user\",\"content\":\"" << llamaJsonEscape(prompt) << "\"}],"
+         << "\"max_tokens\":" << maxTokens << ",\"temperature\":" << temperature << ",\"stream\":false}";
+
+    HttpRawResponse r;
+    try {
+        r = performHttpRequest("POST", base + "/v1/chat/completions",
+                               {{"Content-Type", "application/json"}}, body.str());
+    } catch(const std::exception& e) {
+        throw std::runtime_error("llamaAsk(): cannot reach llama-server at " + base + " (" + e.what() +
+                                 "). Use llamaStart(model.gguf) or llamaConnect(url) first.");
+    }
+    if(r.status != 200)
+        throw std::runtime_error("llamaAsk(): llama-server status " + std::to_string(r.status) + ": " + r.body.substr(0, 300));
+
+    Value root = parseJsonString(r.body);
+    auto bad = [&]() { return std::runtime_error("llamaAsk(): unexpected response: " + r.body.substr(0, 300)); };
+    if(!root.isObject || !root.cex().object) throw bad();
+    auto& ro = *root.cex().object;
+    auto itC = ro.find("choices");
+    if(itC == ro.end() || !itC->second.isObject || !itC->second.cex().isObjectArray ||
+       !itC->second.cex().objectArray || itC->second.cex().objectArray->empty()) throw bad();
+    const Value& first = (*itC->second.cex().objectArray)[0];
+    if(!first.isObject || !first.cex().object) throw bad();
+    auto itM = first.cex().object->find("message");
+    if(itM == first.cex().object->end() || !itM->second.isObject || !itM->second.cex().object) throw bad();
+    auto itT = itM->second.cex().object->find("content");
+    if(itT == itM->second.cex().object->end()) throw bad();
+    if(itT->second.isNull) return "";
+    if(!itT->second.isString) throw bad();
+    return itT->second.str;
 }
 
 struct ThreadRecord {
@@ -4535,13 +5294,74 @@ std::string loadFile(const std::string& path)
 // file's top-level statements once (see loadBundleModule).
 struct GatheredVar { std::string mangledName; Value value; };
 
+class Interpreter; // defined further down; BundleModule only holds a pointer to one
+
 struct BundleModule {
     Program program;                              // the source file's full parsed Program
     std::string sourcePath;
     std::unordered_map<std::string, FunctionDecl> exportedFunctions;  // key: mangled name
+    // Exported Structs (key: mangled "<Bundle>::<Struct>"). Gathering a
+    // struct makes its constructor callable: `Alias.Point(1, 2)` inside the
+    // Gather body, or bare `Point(1, 2)` when no alias was given.
+    std::unordered_map<std::string, StructDecl> exportedStructs;
     std::vector<GatheredVar> exportedVars;         // computed lazily, see below
     bool varsComputed = false;
+    // True for the ENTRY file's own module (see registerEntryModule). Its
+    // `interp` is the live main Interpreter (non-owning), so a Bundle declared
+    // in the entry file can be Gathered back by a file the entry itself
+    // Gathers (A Gathers B, B Gathers A) and both sides see the same state.
+    bool isEntry = false;
+
+    // The module's OWN interpreter -- created by computeBundleModuleVars()
+    // when the module's top-level statements are run, and kept alive after
+    // that. Every exported function / struct constructor is executed inside
+    // it (see callGatheredCallable), NOT in the Interpreter of whoever
+    // Gathered the Bundle. That is what lets an exported function use the
+    // module's private helper functions, private Structs and module-level
+    // variables, instead of failing with "Undefined function/variable"
+    // because those names only exist in the module's file.
+    std::shared_ptr<Interpreter> interp;
+    // An Interpreter is not safe to drive from two threads at once, so every
+    // entry into `interp` (and its lazy creation) is serialized per module.
+    // Recursive so a module function that (indirectly) re-enters its own
+    // module cannot deadlock itself.
+    std::recursive_mutex callMtx;
 };
+
+// Everything callable through a Gather, by mangled name ("<Bundle>::<symbol>").
+// Filled in once by loadBundleModule(); read-only afterwards, so lookups at
+// run time need no lock. Only names containing "::" ever reach this table --
+// that sequence cannot appear in a user-written identifier, so it can never
+// shadow an ordinary function or struct.
+struct GatheredCallable {
+    std::shared_ptr<BundleModule> mod;
+    std::string bundleName;
+    std::string symbol;   // unmangled name inside the module
+    bool isStruct = false;
+};
+static std::unordered_map<std::string, GatheredCallable> g_gatheredCallables;
+
+// Calls a gathered function / struct constructor inside its module's own
+// interpreter. Returns false if `mangledName` isn't a gathered callable.
+// Defined after class Interpreter (it needs the complete type).
+bool callGatheredCallable(const std::string& mangledName, std::vector<Value>& args, Value& out);
+
+// Shard(Bundle.var): promotes the module's own global slot for `var` to a
+// SharedCell (once; later calls reuse it) and returns a handle to that cell.
+// `mangledName` is "<Bundle>::<var>". Returns false if the Bundle is unknown.
+// Defined after class Interpreter (needs the complete type).
+bool shardGatheredVar(const std::string& mangledName, Value& out);
+
+// True (and fills `out` with the live cell handle) when `mangledName` is
+// "<Bundle>::<Alias>" for a `Shard(local) Alias;` declared in that Bundle.
+// Used by Interpreter::lookupVar to resolve such names lazily, the first time
+// they are touched -- the owner's variable may not even exist yet when the
+// Gathering file's top level runs.
+bool shardAliasHandle(const std::string& mangledName, Value& out);
+
+// Bundle name -> loaded module, filled by loadBundleModule(). Shard() needs
+// to find the module that OWNS a variable from just its mangled name.
+static std::unordered_map<std::string, std::shared_ptr<BundleModule>> g_bundleModulesByName;
 
 // Cache of already-parsed/loaded Bundle source files, keyed by resolved
 // path, so a Bundle Gathered from several places (or transitively) is only
@@ -4554,6 +5374,18 @@ static std::unordered_map<std::string, std::shared_ptr<BundleModule>> g_bundleMo
 // resolveGatherStatements -> loadBundleModule ... until the C++ call stack
 // overflows.
 static std::unordered_set<std::string> g_bundleModulesInProgress;
+
+// The entry file's own module (null when the entry declares no Bundle) and its
+// canonical path -- see registerEntryModule().
+static std::shared_ptr<BundleModule> g_entryModule;
+static std::string g_entryCanonPath;
+static std::string canonPath(const std::string& p) {
+#ifndef _WIN32
+    char buf[PATH_MAX];
+    if(realpath(p.c_str(), buf)) return std::string(buf);
+#endif
+    return p;
+}
 
 // Every Bundle name seen in any Program parsed so far this run (the entry
 // file, plus every file loaded while resolving a Gather) -- used purely to
@@ -4580,6 +5412,8 @@ static std::unordered_set<std::string> g_knownBundleNames;
 // deliberately shallow -- textual scan + full parse of each candidate file,
 // same cost as one resolveBundleSourceFile scan -- run once, up front, from
 // main(), not on every failed lookup.
+bool isKnownBundleName(const std::string& n) { return g_knownBundleNames.count(n) != 0; }
+
 void scanDirectoryForBundleNames(const std::string& fromFile) {
     std::string dir = ".";
     auto slash = fromFile.find_last_of("/\\");
@@ -4592,16 +5426,18 @@ void scanDirectoryForBundleNames(const std::string& fromFile) {
         if(fname.size() < 4) continue;
         bool isCnr = (fname.substr(fname.size()-4) == ".cnr") || (fname.substr(fname.size()-4) == ".CnR");
         if(!isCnr) continue;
-        std::string full = dir + "/" + fname;
         std::string src;
-        try { src = loadFile(full); } catch(...) { continue; }
+        try { src = loadFile(dir + "/" + fname); } catch(...) { continue; }
         if(src.find("Bundle") == std::string::npos) continue;
+        // Token-level scan (`Bundle <Name> {`), NOT a full parse: a file that
+        // declares a Bundle may itself use another Bundle by direct access
+        // (`Other.fn()`), which only parses once the known-name set exists.
         try {
             Lexer lx(src);
             auto toks = lx.tokenize();
-            Parser p(toks);
-            Program prog = p.parseProgram();
-            for(auto& kv : prog.bundles) g_knownBundleNames.insert(kv.first);
+            for(size_t i = 0; i + 2 < toks.size(); ++i)
+                if(toks[i].type == TokType::BundleKw && toks[i+1].type == TokType::Ident && toks[i+2].type == TokType::LBrace)
+                    g_knownBundleNames.insert(toks[i+1].text);
         } catch(...) { continue; }
     }
     closedir(d);
@@ -4674,6 +5510,10 @@ void resolveGatherStatements(Program& program, const std::string& fromFile);
 // symbols are validated later, in computeBundleModuleVars, since that
 // requires actually running the file's top-level statements).
 std::shared_ptr<BundleModule> loadBundleModule(const std::string& bundleName, const std::string& fromFile) {
+    // The ENTRY file declares this Bundle and `fromFile` is the entry itself
+    // (Interpreter::execute's Gather case passes the resolved source path).
+    if(g_entryModule && canonPath(fromFile) == g_entryCanonPath && g_entryModule->program.bundles.count(bundleName))
+        return g_entryModule;
     // Fast path: `fromFile` is itself already a resolved, previously-cached
     // module path -- this happens on every call from Interpreter::execute()'s
     // Gather case, which passes `s->sourceFile` (set once by
@@ -4690,6 +5530,13 @@ std::shared_ptr<BundleModule> loadBundleModule(const std::string& bundleName, co
             return cached->second;
     }
     std::string path = resolveBundleSourceFile(bundleName, fromFile);
+    // The Bundle lives in the entry file: hand back the entry's LIVE module
+    // instead of parsing/running the entry a second time (this is what lets
+    // a file that the entry Gathers Gather the entry back).
+    if(g_entryModule && canonPath(path) == g_entryCanonPath && g_entryModule->program.bundles.count(bundleName)) {
+        g_bundleModulesByName[bundleName] = g_entryModule;
+        return g_entryModule;
+    }
     auto it = g_bundleModuleCache.find(path);
     if(it != g_bundleModuleCache.end()) return it->second;
 
@@ -4718,9 +5565,16 @@ std::shared_ptr<BundleModule> loadBundleModule(const std::string& bundleName, co
         auto fIt = mod->program.functions.find(sym);
         if(fIt != mod->program.functions.end()) {
             mod->exportedFunctions[bundleName + "::" + sym] = fIt->second;
+            continue;
         }
-        // Not a function -- must be a top-level var; confirmed to actually
-        // exist once computeBundleModuleVars runs this module's top level.
+        auto sIt = mod->program.structs.find(sym);
+        if(sIt != mod->program.structs.end()) {
+            mod->exportedStructs[bundleName + "::" + sym] = sIt->second;
+            continue;
+        }
+        // Neither a function nor a struct -- must be a top-level var;
+        // confirmed to actually exist once computeBundleModuleVars runs
+        // this module's top level.
     }
     // Recursively resolve any Gather statements *inside the gathered
     // file itself* (a Bundle's source file may itself Gather other
@@ -4738,13 +5592,873 @@ std::shared_ptr<BundleModule> loadBundleModule(const std::string& bundleName, co
     g_bundleModulesInProgress.erase(path);
 
     g_bundleModuleCache[path] = mod;
+    g_bundleModulesByName[bundleName] = mod;
+    for(auto& kv : mod->exportedFunctions) {
+        GatheredCallable gc; gc.mod = mod; gc.bundleName = bundleName;
+        gc.symbol = kv.first.substr(bundleName.size() + 2); gc.isStruct = false;
+        g_gatheredCallables[kv.first] = gc;
+    }
+    for(auto& kv : mod->exportedStructs) {
+        GatheredCallable gc; gc.mod = mod; gc.bundleName = bundleName;
+        gc.symbol = kv.first.substr(bundleName.size() + 2); gc.isStruct = true;
+        g_gatheredCallables[kv.first] = gc;
+    }
     return mod;
+}
+
+// ----------------------------------------------------------------------------
+// Kernel-safe subset checker (CnR_SPEC.md §3.8) -- applies uniformly to
+// Chunk, Wing, Serialize, and Shard bodies (anything compiling to CUDA
+// device code). This is a purely static, compile-time check over the AST:
+// it never runs the program, so it can reject a kernel body before any GPU
+// work is attempted. A violation anywhere is a hard compile-time error --
+// per §3.8, "there is no CPU fallback to drop into."
+//
+// The check is TRANSITIVE across function calls reachable from a kernel
+// body (§3.8: "the compiler must check the full call graph reachable from
+// a kernel body, not just its immediate statements") -- walkFunctionCallGraph
+// tracks a visited-set to avoid rechecking shared callees, and a call-stack
+// set to reject self-recursion (directly or mutual) outright, since CUDA
+// device-side recursion has a limited per-thread stack.
+//
+// Design note: this checker walks the CnR AST directly (Expr/Stmt trees),
+// NOT generated CUDA text -- it must run before codegen, since codegen for
+// an unsafe kernel body should never be attempted in the first place. It is
+// declared here (free function/struct, before class Interpreter) because it
+// only needs Program's static function table, not any interpreter runtime
+// state -- ChunkDecl execution (a method of Interpreter, defined later)
+// calls into this before ever touching codegen or nvcc.
+struct KernelSafetyViolation {
+    std::string message;
+    int line;
+};
+
+struct KernelSafeChecker {
+    using FnMap = std::unordered_map<std::string, FunctionDecl>;
+    const FnMap& functions;
+    std::vector<KernelSafetyViolation> violations;
+    std::unordered_set<std::string> visitedFunctions;
+    std::unordered_set<std::string> callStack;
+
+    explicit KernelSafeChecker(const FnMap& fns) : functions(fns) {}
+
+    void fail(int line, const std::string& msg) {
+        violations.push_back({msg, line});
+    }
+
+    // Disallowed CallExpr names per §3.8's explicit list (file I/O). These
+    // are matched by name because that's how the interpreter itself
+    // dispatches them (see callBuiltinFunction's `if(name=="readFile")...`
+    // chain) -- there's no separate AST node per builtin to switch on.
+    static bool isDisallowedBuiltinName(const std::string& name) {
+        static const std::unordered_set<std::string> disallowed = {
+            "readFile", "writeFile", "appendFile", "fileExists",
+        };
+        return disallowed.count(name) != 0;
+    }
+
+    // Math builtins with a direct CUDA device-math-intrinsic equivalent
+    // (§3.8's allow-list). Anything NOT in this set that isn't a
+    // user-declared function and isn't a disallowed name falls through to
+    // "unknown call in kernel body" -- rejected conservatively rather than
+    // silently assumed safe.
+    static bool isKernelSafeMathBuiltin(const std::string& name) {
+        static const std::unordered_set<std::string> safe = {
+            "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+            "pow", "exp", "log", "log2", "log10", "abs", "floor", "ceil",
+            "round", "min", "max", "fmod",
+        };
+        return safe.count(name) != 0;
+    }
+
+    void checkExpr(const ExprPtr& e) {
+        if(!e) return;
+        switch(e->kind) {
+            case ExprKind::Number: case ExprKind::Bool: case ExprKind::StringLit:
+            case ExprKind::GpuIndexVar:
+                return;
+            case ExprKind::Var:
+                return; // plain scalar var reference -- always safe
+            case ExprKind::Unary:
+                checkExpr(static_cast<UnaryExpr*>(e.get())->expr);
+                return;
+            case ExprKind::Binary: {
+                auto* b = static_cast<BinaryExpr*>(e.get());
+                checkExpr(b->left); checkExpr(b->right);
+                return;
+            }
+            case ExprKind::IntCast: checkExpr(static_cast<IntCastExpr*>(e.get())->expr); return;
+            case ExprKind::LongCast: checkExpr(static_cast<LongCastExpr*>(e.get())->expr); return;
+            case ExprKind::FloatCast: checkExpr(static_cast<FloatCastExpr*>(e.get())->expr); return;
+            case ExprKind::CharCast: checkExpr(static_cast<CharCastExpr*>(e.get())->expr); return;
+            case ExprKind::StringCast: checkExpr(static_cast<StringCastExpr*>(e.get())->expr); return;
+            case ExprKind::BigIntCast:
+                fail(0, "BigInt arithmetic is not allowed inside a kernel body (no arbitrary-precision math on CUDA device code, per spec §3.8) -- kernels are restricted to native double-backed `var`.");
+                return;
+            case ExprKind::BigFloatCast:
+                fail(0, "BigFloat arithmetic is not allowed inside a kernel body (no arbitrary-precision math on CUDA device code, per spec §3.8) -- kernels are restricted to native double-backed `var`.");
+                return;
+            case ExprKind::Len:
+                if(static_cast<LenExpr*>(e.get())->operand)
+                    fail(0, "len() inside a kernel body only accepts a plain array name, e.g. len(arr) (spec §3.8).");
+                return; // len(arr) on an already-resident array is safe (a size, not an access)
+            case ExprKind::ArrayAccess: {
+                auto* a = static_cast<ArrayAccessExpr*>(e.get());
+                checkExpr(a->index);
+                return; // indexing itself is allowed per §3.8; device-residency of the array is a launch-time concern, not a syntactic one
+            }
+            case ExprKind::TensorAccess: {
+                auto* t = static_cast<TensorAccessExpr*>(e.get());
+                for(auto& idx : t->indices) checkExpr(idx);
+                return;
+            }
+            case ExprKind::Call: {
+                auto* c = static_cast<CallExpr*>(e.get());
+                if(isDisallowedBuiltinName(c->name)) {
+                    fail(0, "'" + c->name + "()' is not allowed inside a kernel body: file I/O has no equivalent on the GPU device side (spec §3.8).");
+                    return;
+                }
+                if(isKernelSafeMathBuiltin(c->name)) {
+                    for(auto& a : c->args) checkExpr(a);
+                    return;
+                }
+                auto it = functions.find(c->name);
+                if(it == functions.end()) {
+                    fail(0, "Unknown call '" + c->name + "()' inside a kernel body -- only kernel-safe math builtins and already-declared, kernel-safe user functions may be called (spec §3.8).");
+                    return;
+                }
+                for(auto& a : c->args) checkExpr(a);
+                walkFunctionCallGraph(c->name, it->second);
+                return;
+            }
+            case ExprKind::MemberAccess: {
+                auto* m = static_cast<MemberAccessExpr*>(e.get());
+                checkExpr(m->base);
+                if(m->index) checkExpr(m->index);
+                for(auto& x : m->extraIndices) checkExpr(x);
+                return;
+            }
+            case ExprKind::Thread:
+                fail(0, "thread() cannot be called inside a Chunk/Shard body -- CPU-side concurrency constructs cannot be nested inside GPU device code (spec §3.8).");
+                return;
+            case ExprKind::Join: case ExprKind::JoinAll:
+                fail(0, "join()/joinAll() cannot be called inside a Chunk/Shard body -- synchronization primitives are host-side only (spec §3.8).");
+                return;
+            case ExprKind::ArrayMethodCall: {
+                auto* am = static_cast<ArrayMethodCallExpr*>(e.get());
+                if(am->method == ArrayMethod::Push) {
+                    fail(0, "push() is not allowed inside a kernel body -- dynamic-size array growth would require reallocating GPU memory mid-kernel; array sizes must be fixed before launch (spec §3.8).");
+                    return;
+                }
+                if(am->arg) checkExpr(am->arg);
+                return;
+            }
+            case ExprKind::Fail:
+                return; // Shard's explicit Fail() is allowed (spec §6.2); it's not a CnR exception, it's the DAG failure signal
+            case ExprKind::Throw:
+                fail(0, "Throw is not allowed inside a kernel body -- CUDA device code has no exception support; a kernel-side error should surface as a CUDA error code checked after .joinall(), not a catchable CnR exception (spec §3.8).");
+                return;
+            case ExprKind::ServerConfig:
+                fail(0, "Server/Http constructs cannot appear inside a kernel body -- no network stack on-device (spec §3.8).");
+                return;
+            case ExprKind::ObjectMethodCall:
+                fail(0, "Object method calls are not part of the kernel-safe subset (spec §3.8).");
+                return;
+            case ExprKind::DbMethodCall:
+                fail(0, "Database access (Data/.cnrdb operations) cannot appear inside a kernel body -- host-side only (spec §3.8).");
+                return;
+            case ExprKind::MutexNew: case ExprKind::MutexMethodCall:
+                fail(0, "CPU mutex primitives cannot appear inside a kernel body -- use a `Wing` block for GPU-side synchronization instead (spec §4, §3.8).");
+                return;
+            case ExprKind::CloneCall: case ExprKind::RefCall:
+                return; // handled by the separate host-side .ref()-forbidden-in-Chunk check (§2.3), not the kernel-safe-subset checker
+            case ExprKind::Shard:
+                fail(0, "Shard(Bundle.var) cannot appear inside a kernel body -- it binds a host-side shared cell (cross-module state), which has no device-side equivalent (spec §3.8).");
+                return;
+            case ExprKind::ChunkOpen:
+                fail(0, "Nested Chunk() is not allowed inside a kernel body -- a Chunk/Shard body cannot itself launch another GPU kernel (spec §3.8).");
+                return;
+            case ExprKind::JsonObjectLit: case ExprKind::HttpCall:
+                fail(0, "This expression is not part of the kernel-safe subset (spec §3.8).");
+                return;
+        }
+    }
+
+    void checkStmt(const StmtPtr& s) {
+        if(!s) return;
+        switch(s->kind) {
+            case StmtKind::VarDecl: {
+                auto* v = static_cast<VarDeclStmt*>(s.get());
+                if(v->value) checkExpr(v->value);
+                for(auto& av : v->arrayValues) checkExpr(av);
+                return;
+            }
+            case StmtKind::Assign:
+                checkExpr(static_cast<AssignStmt*>(s.get())->value);
+                return;
+            case StmtKind::ArrayAssign: {
+                auto* a = static_cast<ArrayAssignStmt*>(s.get());
+                if(a->index) checkExpr(a->index);
+                for(auto& idx : a->indices) checkExpr(idx);
+                checkExpr(a->value);
+                return;
+            }
+            case StmtKind::MemberAssign: {
+                auto* m = static_cast<MemberAssignStmt*>(s.get());
+                if(m->index) checkExpr(m->index);
+                for(auto& x : m->indices) checkExpr(x);
+                checkExpr(m->value);
+                return;
+            }
+            case StmtKind::Print:
+                fail(0, "print is not allowed inside a kernel body -- there is no host console to write to from GPU device code (spec §3.8's disallowed I/O list; print is host-side output, same category as file/network I/O).");
+                return;
+            case StmtKind::Block:
+                for(auto& st : static_cast<BlockStmt*>(s.get())->statements) checkStmt(st);
+                return;
+            case StmtKind::If: {
+                auto* i = static_cast<IfStmt*>(s.get());
+                checkExpr(i->condition);
+                checkStmt(i->thenBlock);
+                if(i->elseBlock) checkStmt(i->elseBlock);
+                return;
+            }
+            case StmtKind::While: {
+                auto* w = static_cast<WhileStmt*>(s.get());
+                checkExpr(w->condition);
+                checkStmt(w->body);
+                return;
+            }
+            case StmtKind::For: {
+                auto* f = static_cast<ForStmt*>(s.get());
+                if(f->init) checkStmt(f->init);
+                if(f->condition) checkExpr(f->condition);
+                if(f->increment) checkStmt(f->increment);
+                checkStmt(f->body);
+                return;
+            }
+            case StmtKind::Return:
+                if(static_cast<ReturnStmt*>(s.get())->value) checkExpr(static_cast<ReturnStmt*>(s.get())->value);
+                return;
+            case StmtKind::ExprS:
+                checkExpr(static_cast<ExprStmt*>(s.get())->expr);
+                return;
+            case StmtKind::Break: case StmtKind::Continue:
+                return;
+            case StmtKind::Switch: {
+                auto* sw = static_cast<SwitchStmt*>(s.get());
+                checkExpr(sw->subject);
+                for(auto& c : sw->cases) { checkExpr(c.value); checkStmt(c.body); }
+                if(sw->defaultBody) checkStmt(sw->defaultBody);
+                return;
+            }
+            case StmtKind::Parallel:
+                fail(0, "Parallel{} cannot be nested inside a Chunk/Shard body -- CPU-side concurrency constructs cannot appear inside GPU device code (spec §3.8).");
+                return;
+            case StmtKind::Nodes:
+                fail(0, "Nodes{} cannot be nested inside a Chunk/Shard body -- CPU-side concurrency constructs cannot appear inside GPU device code (spec §3.8).");
+                return;
+            case StmtKind::TryCatch:
+                fail(0, "try/catch is not allowed inside a kernel body -- CUDA device code has no exception support (spec §3.8).");
+                return;
+            case StmtKind::RouteDecl: case StmtKind::ServerStart:
+                fail(0, "Server/route constructs cannot appear inside a kernel body -- no network stack on-device (spec §3.8).");
+                return;
+            case StmtKind::Bundle: case StmtKind::Gather:
+                fail(0, "Bundle/Gather cannot appear inside a kernel body.");
+                return;
+            case StmtKind::ChunkDecl:
+                fail(0, "Nested Chunk cannot appear inside a kernel body -- a Chunk/Shard body cannot itself launch another GPU kernel (spec §3.8).");
+                return;
+        }
+    }
+
+    void walkFunctionCallGraph(const std::string& name, const FunctionDecl& fn) {
+        if(visitedFunctions.count(name)) return;
+        if(callStack.count(name)) {
+            fail(0, "Function '" + name + "' is self-recursive (directly or mutually) and is called from a kernel body -- recursive calls are rejected outright in this version, since CUDA device-side recursion has a limited per-thread stack (spec §3.8).");
+            return;
+        }
+        callStack.insert(name);
+        visitedFunctions.insert(name);
+        checkStmt(fn.body);
+        callStack.erase(name);
+    }
+
+    // Entry point: check a Chunk/Wing/Serialize/Shard kernel body. Returns
+    // true if fully kernel-safe; violations (with best-effort line numbers)
+    // are left in `violations` either way.
+    bool check(const std::shared_ptr<BlockStmt>& body) {
+        violations.clear();
+        visitedFunctions.clear();
+        callStack.clear();
+        checkStmt(body);
+        return violations.empty();
+    }
+};
+
+// ----------------------------------------------------------------------------
+// GPU / CUDA codegen + build bridge for `Chunk` (CnR_SPEC.md §3, §9).
+//
+// Pipeline (per spec, confirmed with Ryu): nvcc build-time compilation,
+// invoked automatically and transparently by the interpreter -- never a
+// separate visible build step for the CnR program's user. A content-hash
+// cache under ./.cnr_cache/ means repeated runs of the same kernel body
+// skip nvcc entirely after the first compile.
+//
+//   ChunkDecl AST --[CudaCodegen::generate]--> CUDA C++ text
+//                 --[hashKernelSource]-------> cache key (sha256 of the
+//                                               generated text, not the CnR
+//                                               source -- two different CnR
+//                                               bodies that codegen
+//                                               identically share a cache
+//                                               entry)
+//                 --[cache hit?]-----> dlopen cached .so
+//                 --[cache miss]-----> write .cu, run nvcc -shared,
+//                                      cache the .so, dlopen it
+//                 --[dlsym]----------> call via the CnrGpuArg/CnrGpuResult
+//                                      extern "C" ABI (fixed, documented
+//                                      below), implemented inline in the
+//                                      generated .cu itself for this first
+//                                      cut (no separate libcnr_gpu.so yet --
+//                                      the runtime glue is emitted directly
+//                                      into every generated kernel file,
+//                                      which keeps the first implementation
+//                                      to one moving part instead of two;
+//                                      factoring shared runtime code out
+//                                      into a linked libcnr_gpu is a
+//                                      straightforward follow-up once
+//                                      Wing/Serialize/Shard exist and the
+//                                      duplication across generated files
+//                                      is worth removing).
+//
+// This first cut supports Form 2 kernel bodies (and Form 1 desugared to the
+// same shape via an implicit switch(index), per §3.2/§11) whose body is
+// ordinary CnR control flow (if/while/for/return) over kernel-safe
+// expressions -- exactly the subset KernelSafeChecker has already validated
+// by the time codegen runs, so this translation is always valid C++ once it
+// passes the checker.
+//
+// NOTE (Linux only in practice): this bridge uses dlopen()/dlsym() (POSIX),
+// guarded by the #ifndef _WIN32 around <dlfcn.h> at the top of this file.
+// GPU support in CnR is therefore unavailable on Windows builds, and macOS
+// has no CUDA toolchain in practice regardless of dlopen availability.
+
+extern "C" {
+    struct CnrGpuArg {
+        double* data;
+        long long len;
+    };
+    struct CnrGpuResult {
+        double* data;
+        long long len;
+        int error_code; // 0 == ok; non-zero == CUDA error captured host-side, checked after the launch's sync
+    };
+}
+using CnrChunkLaunchFn = CnrGpuResult(*)(CnrGpuArg*, int, long long);
+using CnrGpuFreeFn = void(*)(CnrGpuResult);
+
+// Thrown when kernel-safety, codegen, nvcc, or dlopen/dlsym fails. Carries
+// a human-readable message all the way out to the CnR program's top-level
+// error report -- GPU failures are always hard errors (spec: "there is no
+// CPU fallback to drop into").
+struct GpuBuildError : std::runtime_error {
+    explicit GpuBuildError(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+// ---- Codegen: ChunkDecl kernel body -> CUDA C++ source text ----
+struct CudaCodegen {
+    std::ostringstream out;
+    // Names of arrays referenced via ArrayAccessExpr(name, index) inside the
+    // kernel body -- these become `const double*`/length device-pointer
+    // parameters, and their host-side Values must be cudaMemcpy'd to device
+    // buffers before launch (done by the bridge, not codegen itself).
+    std::vector<std::string> arrayRefs;
+    std::unordered_set<std::string> seenArrayRefs;
+    // Transitively-called user functions that must ALSO be emitted as
+    // __device__ functions in the same .cu file. Fixes a real bug: emitting
+    // only the call site (e.g. Form 1's `return taskA();`) without also
+    // emitting taskA's body produces an "undefined reference" at nvcc link
+    // time. Populated by collectCalledFunctions, which walks the same
+    // reachable-call-graph KernelSafeChecker already validated -- every name
+    // collected here is therefore guaranteed kernel-safe and present in
+    // `allFunctions` by the time codegen runs (the checker ran first).
+    const std::unordered_map<std::string, FunctionDecl>* allFunctions = nullptr;
+    std::vector<std::string> calledFunctionOrder; // emission order: callees before callers
+    std::unordered_set<std::string> seenCalledFunctions;
+
+    void noteArrayRef(const std::string& name) {
+        if(seenArrayRefs.insert(name).second) arrayRefs.push_back(name);
+    }
+
+    void collectCalledFunctionsExpr(const ExprPtr& e) {
+        if(!e) return;
+        switch(e->kind) {
+            case ExprKind::Call: {
+                auto* c = static_cast<CallExpr*>(e.get());
+                for(auto& a : c->args) collectCalledFunctionsExpr(a);
+                if(allFunctions) {
+                    auto it = allFunctions->find(c->name);
+                    if(it != allFunctions->end() && seenCalledFunctions.insert(c->name).second) {
+                        // Visit the callee's body FIRST (post-order), so a
+                        // function is only emitted after everything it
+                        // itself calls -- avoids forward-declaration
+                        // bookkeeping since nvcc/C++ just needs earlier
+                        // definitions for direct (non-mutually-recursive)
+                        // calls, which is all KernelSafeChecker allows
+                        // through (it rejects any self-recursion, direct or
+                        // mutual, so no cycle can reach here).
+                        collectCalledFunctionsStmt(it->second.body);
+                        calledFunctionOrder.push_back(c->name);
+                    }
+                }
+                return;
+            }
+            case ExprKind::Binary: { auto* b = static_cast<BinaryExpr*>(e.get()); collectCalledFunctionsExpr(b->left); collectCalledFunctionsExpr(b->right); return; }
+            case ExprKind::Unary: collectCalledFunctionsExpr(static_cast<UnaryExpr*>(e.get())->expr); return;
+            case ExprKind::ArrayAccess: collectCalledFunctionsExpr(static_cast<ArrayAccessExpr*>(e.get())->index); return;
+            case ExprKind::IntCast: collectCalledFunctionsExpr(static_cast<IntCastExpr*>(e.get())->expr); return;
+            case ExprKind::FloatCast: collectCalledFunctionsExpr(static_cast<FloatCastExpr*>(e.get())->expr); return;
+            case ExprKind::LongCast: collectCalledFunctionsExpr(static_cast<LongCastExpr*>(e.get())->expr); return;
+            default: return;
+        }
+    }
+    void collectCalledFunctionsStmt(const StmtPtr& s) {
+        if(!s) return;
+        switch(s->kind) {
+            case StmtKind::VarDecl: collectCalledFunctionsExpr(static_cast<VarDeclStmt*>(s.get())->value); return;
+            case StmtKind::Assign: collectCalledFunctionsExpr(static_cast<AssignStmt*>(s.get())->value); return;
+            case StmtKind::Return: if(static_cast<ReturnStmt*>(s.get())->value) collectCalledFunctionsExpr(static_cast<ReturnStmt*>(s.get())->value); return;
+            case StmtKind::ExprS: collectCalledFunctionsExpr(static_cast<ExprStmt*>(s.get())->expr); return;
+            case StmtKind::Block: for(auto& st : static_cast<BlockStmt*>(s.get())->statements) collectCalledFunctionsStmt(st); return;
+            case StmtKind::If: { auto* i = static_cast<IfStmt*>(s.get()); collectCalledFunctionsExpr(i->condition); collectCalledFunctionsStmt(i->thenBlock); if(i->elseBlock) collectCalledFunctionsStmt(i->elseBlock); return; }
+            case StmtKind::While: { auto* w = static_cast<WhileStmt*>(s.get()); collectCalledFunctionsExpr(w->condition); collectCalledFunctionsStmt(w->body); return; }
+            case StmtKind::For: { auto* f = static_cast<ForStmt*>(s.get()); if(f->init) collectCalledFunctionsStmt(f->init); if(f->condition) collectCalledFunctionsExpr(f->condition); if(f->increment) collectCalledFunctionsStmt(f->increment); collectCalledFunctionsStmt(f->body); return; }
+            case StmtKind::Switch: { auto* sw = static_cast<SwitchStmt*>(s.get()); collectCalledFunctionsExpr(sw->subject); for(auto& c : sw->cases) { collectCalledFunctionsExpr(c.value); collectCalledFunctionsStmt(c.body); } if(sw->defaultBody) collectCalledFunctionsStmt(sw->defaultBody); return; }
+            default: return;
+        }
+    }
+    // Emits one user function as a __device__ function. Parameters and
+    // locals are all `double` (CnR is dynamically typed; the kernel-safe
+    // subset restricts values to native numbers, per §3.8), matching how
+    // the rest of this codegen already treats every CnR value as `double`.
+    // A gathered function's name is "<Bundle>::fn"; '::' is not legal inside
+    // a C++/CUDA identifier, so it is flattened to "__" for emission.
+    static std::string cudaIdent(std::string n) {
+        for(size_t p; (p = n.find("::")) != std::string::npos; ) n.replace(p, 2, "__");
+        return n;
+    }
+    void emitDeviceFunction(const std::string& name, const FunctionDecl& fn) {
+        out << "__device__ double cnr_fn_" << cudaIdent(name) << "(";
+        for(size_t i = 0; i < fn.params.size(); ++i) {
+            if(i) out << ", ";
+            out << "double cnr_" << fn.params[i];
+        }
+        out << ") {\n";
+        emitStmt(fn.body);
+        out << "return 0.0;\n";
+        out << "}\n\n";
+    }
+
+    void collectArrayRefsExpr(const ExprPtr& e) {
+        if(!e) return;
+        switch(e->kind) {
+            case ExprKind::ArrayAccess: {
+                auto* a = static_cast<ArrayAccessExpr*>(e.get());
+                noteArrayRef(a->arrayName);
+                collectArrayRefsExpr(a->index);
+                return;
+            }
+            case ExprKind::Binary: { auto* b = static_cast<BinaryExpr*>(e.get()); collectArrayRefsExpr(b->left); collectArrayRefsExpr(b->right); return; }
+            case ExprKind::Unary: collectArrayRefsExpr(static_cast<UnaryExpr*>(e.get())->expr); return;
+            case ExprKind::Call: { auto* c = static_cast<CallExpr*>(e.get()); for(auto& a : c->args) collectArrayRefsExpr(a); return; }
+            case ExprKind::IntCast: collectArrayRefsExpr(static_cast<IntCastExpr*>(e.get())->expr); return;
+            case ExprKind::FloatCast: collectArrayRefsExpr(static_cast<FloatCastExpr*>(e.get())->expr); return;
+            case ExprKind::LongCast: collectArrayRefsExpr(static_cast<LongCastExpr*>(e.get())->expr); return;
+            default: return;
+        }
+    }
+    void collectArrayRefsStmt(const StmtPtr& s) {
+        if(!s) return;
+        switch(s->kind) {
+            case StmtKind::VarDecl: { auto* v = static_cast<VarDeclStmt*>(s.get()); collectArrayRefsExpr(v->value); return; }
+            case StmtKind::Assign: collectArrayRefsExpr(static_cast<AssignStmt*>(s.get())->value); return;
+            case StmtKind::Return: if(static_cast<ReturnStmt*>(s.get())->value) collectArrayRefsExpr(static_cast<ReturnStmt*>(s.get())->value); return;
+            case StmtKind::ExprS: collectArrayRefsExpr(static_cast<ExprStmt*>(s.get())->expr); return;
+            case StmtKind::Block: for(auto& st : static_cast<BlockStmt*>(s.get())->statements) collectArrayRefsStmt(st); return;
+            case StmtKind::If: { auto* i = static_cast<IfStmt*>(s.get()); collectArrayRefsExpr(i->condition); collectArrayRefsStmt(i->thenBlock); if(i->elseBlock) collectArrayRefsStmt(i->elseBlock); return; }
+            case StmtKind::While: { auto* w = static_cast<WhileStmt*>(s.get()); collectArrayRefsExpr(w->condition); collectArrayRefsStmt(w->body); return; }
+            case StmtKind::For: { auto* f = static_cast<ForStmt*>(s.get()); if(f->init) collectArrayRefsStmt(f->init); if(f->condition) collectArrayRefsExpr(f->condition); if(f->increment) collectArrayRefsStmt(f->increment); collectArrayRefsStmt(f->body); return; }
+            case StmtKind::Switch: { auto* sw = static_cast<SwitchStmt*>(s.get()); collectArrayRefsExpr(sw->subject); for(auto& c : sw->cases) { collectArrayRefsExpr(c.value); collectArrayRefsStmt(c.body); } if(sw->defaultBody) collectArrayRefsStmt(sw->defaultBody); return; }
+            default: return;
+        }
+    }
+
+    void emitExpr(const ExprPtr& e) {
+        switch(e->kind) {
+            case ExprKind::Number: out << static_cast<NumberExpr*>(e.get())->value; return;
+            case ExprKind::Bool: out << (static_cast<BoolExpr*>(e.get())->value ? "1.0" : "0.0"); return;
+            case ExprKind::GpuIndexVar: out << "__cnr_index"; return;
+            case ExprKind::Var: out << "cnr_" << static_cast<VarExpr*>(e.get())->name; return;
+            case ExprKind::Unary: {
+                auto* u = static_cast<UnaryExpr*>(e.get());
+                out << (u->op == TokType::Minus ? "-" : "!") << "(";
+                emitExpr(u->expr);
+                out << ")";
+                return;
+            }
+            case ExprKind::Binary: {
+                auto* b = static_cast<BinaryExpr*>(e.get());
+                if(b->op == TokType::Percent) {
+                    out << "fmod(";
+                    emitExpr(b->left);
+                    out << ", ";
+                    emitExpr(b->right);
+                    out << ")";
+                    return;
+                }
+                out << "(";
+                emitExpr(b->left);
+                out << " " << binOpToCpp(b->op) << " ";
+                emitExpr(b->right);
+                out << ")";
+                return;
+            }
+            case ExprKind::ArrayAccess: {
+                auto* a = static_cast<ArrayAccessExpr*>(e.get());
+                out << "cnr_" << a->arrayName << "[(long long)(";
+                emitExpr(a->index);
+                out << ")]";
+                return;
+            }
+            case ExprKind::Len:
+                // len(arr) inside a kernel is the array's fixed device-side
+                // length, passed in as an implicit `<name>_len` parameter
+                // (see generate()) rather than recomputed.
+                out << "cnr_" << static_cast<LenExpr*>(e.get())->arrayName << "_len";
+                return;
+            case ExprKind::Call: {
+                auto* c = static_cast<CallExpr*>(e.get());
+                bool isUserFn = allFunctions && allFunctions->count(c->name) != 0;
+                out << (isUserFn ? ("cnr_fn_" + cudaIdent(c->name)) : cudaMathName(c->name)) << "(";
+                for(size_t i = 0; i < c->args.size(); ++i) {
+                    if(i) out << ", ";
+                    emitExpr(c->args[i]);
+                }
+                out << ")";
+                return;
+            }
+            case ExprKind::IntCast: out << "(double)(long long)("; emitExpr(static_cast<IntCastExpr*>(e.get())->expr); out << ")"; return;
+            case ExprKind::LongCast: out << "(double)(long long)("; emitExpr(static_cast<LongCastExpr*>(e.get())->expr); out << ")"; return;
+            case ExprKind::FloatCast: out << "(double)("; emitExpr(static_cast<FloatCastExpr*>(e.get())->expr); out << ")"; return;
+            default:
+                throw GpuBuildError("Internal codegen error: expression kind not yet supported by CUDA codegen (this should have been caught by KernelSafeChecker first)");
+        }
+    }
+    static const char* binOpToCpp(TokType op) {
+        switch(op) {
+            case TokType::Plus: return "+"; case TokType::Minus: return "-";
+            case TokType::Star: return "*"; case TokType::Slash: return "/";
+            case TokType::EqualEqual: return "=="; case TokType::BangEqual: return "!=";
+            case TokType::Less: return "<"; case TokType::LessEqual: return "<=";
+            case TokType::Greater: return ">"; case TokType::GreaterEqual: return ">=";
+            case TokType::AndAnd: return "&&"; case TokType::OrOr: return "||";
+            default: throw GpuBuildError("Internal codegen error: unsupported binary operator in kernel body");
+        }
+    }
+    static std::string cudaMathName(const std::string& name) {
+        if(name == "abs") return "fabs";
+        return name;
+    }
+
+    void emitStmt(const StmtPtr& s) {
+        switch(s->kind) {
+            case StmtKind::VarDecl: {
+                auto* v = static_cast<VarDeclStmt*>(s.get());
+                out << "double cnr_" << v->name << " = ";
+                if(v->value) emitExpr(v->value); else out << "0.0";
+                out << ";\n";
+                return;
+            }
+            case StmtKind::Assign: {
+                auto* a = static_cast<AssignStmt*>(s.get());
+                out << "cnr_" << a->name << " = ";
+                emitExpr(a->value);
+                out << ";\n";
+                return;
+            }
+            case StmtKind::Return: {
+                auto* r = static_cast<ReturnStmt*>(s.get());
+                out << "return ";
+                if(r->value) emitExpr(r->value); else out << "0.0";
+                out << ";\n";
+                return;
+            }
+            case StmtKind::ExprS:
+                emitExpr(static_cast<ExprStmt*>(s.get())->expr);
+                out << ";\n";
+                return;
+            case StmtKind::Block:
+                for(auto& st : static_cast<BlockStmt*>(s.get())->statements) emitStmt(st);
+                return;
+            case StmtKind::If: {
+                auto* i = static_cast<IfStmt*>(s.get());
+                out << "if("; emitExpr(i->condition); out << ") {\n";
+                emitStmt(i->thenBlock);
+                out << "}\n";
+                if(i->elseBlock) { out << "else {\n"; emitStmt(i->elseBlock); out << "}\n"; }
+                return;
+            }
+            case StmtKind::While: {
+                auto* w = static_cast<WhileStmt*>(s.get());
+                out << "while("; emitExpr(w->condition); out << ") {\n";
+                emitStmt(w->body);
+                out << "}\n";
+                return;
+            }
+            case StmtKind::For: {
+                auto* f = static_cast<ForStmt*>(s.get());
+                out << "for(";
+                if(f->init) emitStmtInline(f->init); out << "; ";
+                if(f->condition) emitExpr(f->condition); out << "; ";
+                if(f->increment) emitStmtInline(f->increment);
+                out << ") {\n";
+                emitStmt(f->body);
+                out << "}\n";
+                return;
+            }
+            case StmtKind::Break: out << "break;\n"; return;
+            case StmtKind::Continue: out << "continue;\n"; return;
+            case StmtKind::Switch: {
+                // Used by Form 1's desugared dispatch (spec §3.2/§11):
+                // switch(index) { case 0 { return taskA(); } ... }. Emitted
+                // as an ordinary C++ switch; each case's body already ends
+                // in `return` (desugarChunkForm1 always synthesizes exactly
+                // that shape), so no fallthrough/break bookkeeping is
+                // needed beyond what emitStmt already does per statement.
+                auto* sw = static_cast<SwitchStmt*>(s.get());
+                out << "switch((long long)(";
+                emitExpr(sw->subject);
+                out << ")) {\n";
+                for(auto& c : sw->cases) {
+                    out << "case (long long)(";
+                    emitExpr(c.value);
+                    out << "): {\n";
+                    emitStmt(c.body);
+                    out << "break;\n}\n";
+                }
+                if(sw->defaultBody) {
+                    out << "default: {\n";
+                    emitStmt(sw->defaultBody);
+                    out << "break;\n}\n";
+                }
+                out << "}\n";
+                return;
+            }
+            default:
+                throw GpuBuildError("Internal codegen error: statement kind not yet supported by CUDA codegen (this should have been caught by KernelSafeChecker first)");
+        }
+    }
+    void emitStmtInline(const StmtPtr& s) {
+        if(s->kind == StmtKind::VarDecl) {
+            auto* v = static_cast<VarDeclStmt*>(s.get());
+            out << "double cnr_" << v->name << " = ";
+            if(v->value) emitExpr(v->value); else out << "0.0";
+        } else if(s->kind == StmtKind::Assign) {
+            auto* a = static_cast<AssignStmt*>(s.get());
+            out << "cnr_" << a->name << " = ";
+            emitExpr(a->value);
+        } else {
+            throw GpuBuildError("Internal codegen error: unsupported for-loop clause in kernel body");
+        }
+    }
+
+    // Emits the full .cu source for one Chunk. `funcSuffix` is a
+    // placeholder used only to build a syntactically-unique symbol name
+    // before the real content hash is known (hashKernelSource hashes this
+    // output, then the caller regenerates with the real hash as suffix --
+    // see compileOrLoadChunkKernel). Using a fixed placeholder here keeps
+    // generate() itself hash-agnostic and pure.
+    std::string generate(const ChunkDecl& decl, const std::string& funcSuffix) {
+        collectArrayRefsStmt(decl.kernelBody);
+        collectCalledFunctionsStmt(decl.kernelBody);
+        out.str("");
+        out << "// Auto-generated by CnR's GPU codegen. Do not edit by hand.\n";
+        out << "#include <cstdio>\n#include <cmath>\n#include <cuda_runtime.h>\n\n";
+        out << "extern \"C\" {\n";
+        out << "struct CnrGpuArg { double* data; long long len; };\n";
+        out << "struct CnrGpuResult { double* data; long long len; int error_code; };\n";
+        out << "}\n\n";
+
+        // Emit every transitively-called user function as __device__ BEFORE
+        // the worker that calls them -- calledFunctionOrder is already
+        // callees-before-callers (see collectCalledFunctionsExpr's
+        // post-order visit), so a plain top-to-bottom emission needs no
+        // forward declarations.
+        for(auto& fnName : calledFunctionOrder) {
+            emitDeviceFunction(fnName, allFunctions->at(fnName));
+        }
+
+        out << "__device__ double cnr_worker_" << funcSuffix << "(long long __cnr_index";
+        for(auto& name : arrayRefs) {
+            out << ", const double* cnr_" << name << ", long long cnr_" << name << "_len";
+        }
+        out << ") {\n";
+        emitStmt(decl.kernelBody);
+        // Defensive fallback return in case the body's control flow doesn't
+        // cover every path with an explicit `return` (KernelSafeChecker
+        // does not currently enforce total return coverage) -- returning
+        // 0.0 rather than leaving nvcc a "missing return" compile error.
+        out << "return 0.0;\n";
+        out << "}\n\n";
+
+        out << "__global__ void cnr_kernel_" << funcSuffix << "(double* __cnr_out, long long __cnr_n";
+        for(auto& name : arrayRefs) {
+            out << ", const double* cnr_" << name << ", long long cnr_" << name << "_len";
+        }
+        out << ") {\n";
+        out << "  long long __cnr_index = (long long)blockIdx.x * blockDim.x + threadIdx.x;\n";
+        out << "  if(__cnr_index >= __cnr_n) return;\n";
+        out << "  __cnr_out[__cnr_index] = cnr_worker_" << funcSuffix << "(__cnr_index";
+        for(auto& name : arrayRefs) out << ", cnr_" << name << ", cnr_" << name << "_len";
+        out << ");\n";
+        out << "}\n\n";
+
+        out << "extern \"C\" CnrGpuResult cnr_chunk_" << funcSuffix << "(CnrGpuArg* inputs, int n_inputs, long long n_items) {\n";
+        out << "  CnrGpuResult result{nullptr, 0, 0};\n";
+        out << "  double* d_out = nullptr;\n";
+        out << "  cudaError_t err = cudaMalloc(&d_out, sizeof(double) * (size_t)n_items);\n";
+        out << "  if(err != cudaSuccess) { result.error_code = (int)err; return result; }\n";
+        int idx = 0;
+        for(auto& name : arrayRefs) {
+            out << "  double* d_" << name << " = nullptr;\n";
+            out << "  cudaMalloc(&d_" << name << ", sizeof(double) * (size_t)inputs[" << idx << "].len);\n";
+            out << "  cudaMemcpy(d_" << name << ", inputs[" << idx << "].data, sizeof(double) * (size_t)inputs[" << idx << "].len, cudaMemcpyHostToDevice);\n";
+            idx++;
+        }
+        out << "  int threadsPerBlock = 256;\n";
+        out << "  int blocks = (int)((n_items + threadsPerBlock - 1) / threadsPerBlock);\n";
+        out << "  cnr_kernel_" << funcSuffix << "<<<blocks, threadsPerBlock>>>(d_out, n_items";
+        idx = 0;
+        for(auto& name : arrayRefs) { out << ", d_" << name << ", inputs[" << idx << "].len"; idx++; }
+        out << ");\n";
+        out << "  err = cudaDeviceSynchronize();\n";
+        out << "  if(err != cudaSuccess) { result.error_code = (int)err; cudaFree(d_out); ";
+        for(auto& name : arrayRefs) out << "cudaFree(d_" << name << "); ";
+        out << "return result; }\n";
+        out << "  double* h_out = new double[(size_t)n_items];\n";
+        out << "  cudaMemcpy(h_out, d_out, sizeof(double) * (size_t)n_items, cudaMemcpyDeviceToHost);\n";
+        out << "  cudaFree(d_out);\n";
+        for(auto& name : arrayRefs) out << "  cudaFree(d_" << name << ");\n";
+        out << "  result.data = h_out;\n  result.len = n_items;\n  result.error_code = 0;\n";
+        out << "  return result;\n";
+        out << "}\n\n";
+        out << "extern \"C\" void cnr_gpu_free(CnrGpuResult r) { delete[] r.data; }\n";
+        return out.str();
+    }
+};
+
+// Content-hash of the generated CUDA source (using this file's existing
+// Sha256 implementation rather than pulling in a new hashing dependency).
+std::string hashKernelSource(const std::string& cudaSource) {
+    std::vector<uint8_t> bytes(cudaSource.begin(), cudaSource.end());
+    auto digest = cnrcrypto::Sha256::hash(bytes);
+    std::ostringstream hex;
+    for(auto b : digest) hex << std::hex << std::setfill('0') << std::setw(2) << (int)b;
+    return hex.str();
+}
+
+// Compiles (or loads from cache) the .so backing one Chunk kernel, and
+// resolves its launch function pointer. Cache directory is `./.cnr_cache`
+// (relative to CWD, confirmed with Ryu) -- created on first use if absent.
+// `-arch=native` targets whatever GPU is visible on the machine actually
+// running nvcc (CUDA 11.6+, confirmed with Ryu as the minimum target). If
+// nvcc itself is missing from PATH, this fails with a clear, actionable
+// message rather than a raw "command not found" -- GPU support is opt-in
+// per program, but once a .cnr file uses Chunk, a missing toolchain is a
+// hard stop (spec: no CPU fallback).
+struct CompiledChunkKernel {
+    void* dlHandle = nullptr;
+    CnrChunkLaunchFn launch = nullptr;
+    CnrGpuFreeFn freeResult = nullptr;
+};
+
+CompiledChunkKernel compileOrLoadChunkKernel(const ChunkDecl& decl, const std::unordered_map<std::string, FunctionDecl>& allFunctions, std::string& outHash) {
+#ifdef _WIN32
+    throw GpuBuildError("Chunk/GPU support requires a POSIX host (Linux) -- dlopen()-based kernel loading is unavailable on Windows builds of CnR.");
+#else
+    // Two-pass generation: first pass with a placeholder suffix to get the
+    // content to hash, second pass with the real hash baked in as the
+    // symbol suffix (so distinct kernels never collide on the exported
+    // dlsym() name, and identical kernels always produce byte-identical
+    // source -- required for the cache to work at all).
+    CudaCodegen codegen;
+    codegen.allFunctions = &allFunctions;
+    std::string draft = codegen.generate(decl, "draft");
+    std::string hash = hashKernelSource(draft);
+    CudaCodegen codegen2;
+    codegen2.allFunctions = &allFunctions;
+    std::string finalSource = codegen2.generate(decl, hash);
+    outHash = hash;
+
+    const std::string cacheDir = "./.cnr_cache";
+    const std::string soPath = cacheDir + "/" + hash + ".so";
+
+    struct stat st{};
+    bool cacheHit = (stat(soPath.c_str(), &st) == 0);
+
+    if(!cacheHit) {
+        mkdir(cacheDir.c_str(), 0755);
+        std::string cuPath = cacheDir + "/" + hash + ".cu";
+        {
+            std::ofstream cuFile(cuPath);
+            if(!cuFile) throw GpuBuildError("Failed to write generated CUDA source to '" + cuPath + "'");
+            cuFile << finalSource;
+        }
+        std::string cmd = "nvcc -ccbin /usr/bin/gcc-14 -std=c++17 -O3 -arch=native --shared -Xcompiler -fPIC -o " //MARKER8767
+                         + soPath + " " + cuPath + " 2>&1";
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if(!pipe) throw GpuBuildError("Failed to invoke nvcc (popen failed) -- is nvcc installed and on PATH?");
+        std::ostringstream nvccOutput;
+        char buf[256];
+        while(fgets(buf, sizeof(buf), pipe)) nvccOutput << buf;
+        int rc = pclose(pipe);
+        if(rc != 0) {
+            throw GpuBuildError(
+                "nvcc failed to compile the generated CUDA kernel (source at '" + cuPath + "'):\n" +
+                nvccOutput.str() +
+                "\nIf nvcc is not installed or not on PATH, GPU (Chunk/Wing/Serialize/Shard) support cannot be used -- "
+                "install the CUDA toolkit (11.6+) or update your PATH."
+            );
+        }
+    }
+
+    CompiledChunkKernel result;
+    result.dlHandle = dlopen(soPath.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if(!result.dlHandle) {
+        const char* err = dlerror();
+        throw GpuBuildError("Failed to dlopen compiled Chunk kernel '" + soPath + "': " + (err ? err : "unknown error"));
+    }
+    std::string launchSymbol = "cnr_chunk_" + hash;
+    result.launch = reinterpret_cast<CnrChunkLaunchFn>(dlsym(result.dlHandle, launchSymbol.c_str()));
+    if(!result.launch) {
+        const char* err = dlerror();
+        throw GpuBuildError("Failed to resolve symbol '" + launchSymbol + "' in compiled Chunk kernel: " + (err ? err : "unknown error"));
+    }
+    result.freeResult = reinterpret_cast<CnrGpuFreeFn>(dlsym(result.dlHandle, "cnr_gpu_free"));
+    if(!result.freeResult) {
+        const char* err = dlerror();
+        throw GpuBuildError(std::string("Failed to resolve symbol 'cnr_gpu_free' in compiled Chunk kernel: ") + (err ? err : "unknown error"));
+    }
+    return result;
+#endif
 }
 
 // Forward declaration: defined after the Interpreter class (it constructs
 // one internally to run a gathered module's top-level statements), but
 // Interpreter::execute()'s Gather case needs to call it.
 void computeBundleModuleVars(BundleModule& mod, const std::string& bundleName);
+void seedImplicitBundleVars(Interpreter& in, const Program& program);
 
 class Interpreter {
 public:
@@ -4823,6 +6537,15 @@ Value& lookupVar(const std::string& name) {
     for(auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
         if(Value* found = it->find(name)) return *found;
     }
+    // `Shard(n) Number;` exports: resolved lazily on first touch, then cached
+    // in this interpreter's global scope as the live cell handle.
+    if(name.find("::") != std::string::npos) {
+        Value handle;
+        if(shardAliasHandle(name, handle)) {
+            scopes.front()[name] = handle;
+            return *scopes.front().find(name);
+        }
+    }
     if(g_knownBundleNames.count(name))
         throw std::runtime_error("Undefined variable '" + name + "' -- did you forget to Gather it? "
                                   "'" + name + "' is a Bundle; its symbols are only visible inside a "
@@ -4849,6 +6572,19 @@ std::vector<std::pair<std::string, Value>> snapshotGlobalScope() {
     } else {
         snap.reserve(g.small.size());
         for(auto& kv : g.small) snap.emplace_back(kv.first, kv.second);
+    }
+    // Gathered vars ("<Bundle>::name") live in the child scope a Gather
+    // statement pushes, not in the global scope -- so a Parallel{}/thread()
+    // started from inside a Gather body would otherwise not see them. Only
+    // these "::"-named entries are picked up from the inner scopes; ordinary
+    // function locals stay uncaptured, exactly as before.
+    for(size_t i = 1; i < scopes.size(); ++i) {
+        Scope& sc = scopes[i];
+        auto takeIfGathered = [&](const std::string& name, const Value& v) {
+            if(name.find("::") != std::string::npos || v.cex().isShardHandle) snap.emplace_back(name, v);
+        };
+        if(sc.big) for(auto& kv : *sc.big) takeIfGathered(kv.first, kv.second);
+        else for(auto& kv : sc.small) takeIfGathered(kv.first, kv.second);
     }
     return snap;
 }
@@ -4879,6 +6615,36 @@ Value& resolveVar(const std::string& name) {
     // read that must be atomic with respect to concurrent writers.
     if(slot.cex().isMutableCell) return *slot.ex().cell->payload;
     return slot;
+}
+
+// Independent deep copy of an array or struct Value (used by .clone()).
+//  - A Value copy shares its `extra` block (shared_ptr), and a struct's
+//    field table lives in that block, so copying the Value alone would still
+//    alias every field. Here the extra block itself is duplicated and the
+//    field table rebuilt, recursing into nested structs.
+//  - A field that is itself a `mutable` cell is kept SHARED on purpose:
+//    sharing is the whole contract of `mutable`, cloning the outer struct
+//    must not silently sever it.
+//  - A top-level mutable/.ref() handle is unwrapped to its current payload
+//    first, so a clone is always a plain, unshared value.
+static Value deepCloneValue(const Value& in) {
+    const Value* src = &in;
+    if(in.cex().isMutableCell && in.cex().cell && in.cex().cell->payload)
+        src = in.cex().cell->payload.get();
+    Value out = *src;
+    if(src->extra) {
+        out.extra = std::make_shared<ValueExtra>(*src->extra);
+        out.extra->isMutableCell = false;
+        out.extra->isShardHandle = false;
+        out.extra->cell.reset();
+        if(src->extra->fields) {
+            auto nf = std::make_shared<std::unordered_map<std::string, Value>>();
+            for(auto& kv : *src->extra->fields)
+                (*nf)[kv.first] = kv.second.cex().isMutableCell ? kv.second : deepCloneValue(kv.second);
+            out.extra->fields = nf;
+        }
+    }
+    return out;
 }
 
 // Implements `a.ref()` (see CnR_SPEC.md %2.1 and RefCallExpr's comment): a
@@ -5097,6 +6863,25 @@ bool valueNeedsObjectSlot(const Value& v) {
     return v.isStruct || v.isObject || v.isString || v.isBool || v.isNull;
 }
 
+// Size of any "sized" value, for the general len(<expr>) form:
+//   array / Matrix / Tensor -> first dimension   string -> bytes
+//   JSON array              -> element count     JSON object -> key count
+static double lenOfValue(const Value& in) {
+    const Value* v = &in;
+    if(v->cex().isMutableCell && v->cex().cell && v->cex().cell->payload)
+        v = v->cex().cell->payload.get(); // unwrap `mutable` handle
+    if(v->isString) return (double)v->str.size();
+    if(v->isObject) {
+        if(v->cex().isObjectArray) return v->cex().objectArray ? (double)v->cex().objectArray->size() : 0.0;
+        return v->cex().object ? (double)v->cex().object->size() : 0.0;
+    }
+    if(v->isArray) {
+        if(!v->dims.empty()) return (double)v->dims[0];
+        return (double)v->array.size();
+    }
+    throw std::runtime_error("len() expects an array, string or JSON object/array");
+}
+
 double evalNumber(const ExprPtr& expr)
 {
     // Dispatch on the AST tag instead of trying std::dynamic_pointer_cast<T>
@@ -5130,8 +6915,12 @@ double evalNumber(const ExprPtr& expr)
         return x;
     }
 
-    case ExprKind::CharCast:
-        return evalNumber(static_cast<CharCastExpr*>(expr.get())->expr);
+    case ExprKind::CharCast: {
+        auto cc = static_cast<CharCastExpr*>(expr.get());
+        if(cc->isArray)
+            throw std::runtime_error("(char[]) produces a string, not a number; use it with print(), a string variable or '+' concatenation");
+        return evalNumber(cc->expr);
+    }
 
     case ExprKind::IntCast:
     case ExprKind::LongCast:
@@ -5185,9 +6974,12 @@ double evalNumber(const ExprPtr& expr)
 
     case ExprKind::Len: {
         auto l = static_cast<LenExpr*>(expr.get());
+        if(l->operand) return lenOfValue(evalToValue(l->operand));
         Value& val = resolveVar(l->arrayName);
-        if(!val.isArray)
+        if(!val.isArray) {
+            if(val.isString || val.isObject) return lenOfValue(val); // len(str) / len(jsonObj)
             throw std::runtime_error("'" + l->arrayName + "' is not an array");
+        }
         if(!val.dims.empty()) return (double)val.dims[0];
         return (double)val.array.size();
     }
@@ -5308,6 +7100,29 @@ Value evalToValue(const ExprPtr& expr) {
     }
     case ExprKind::Thread:
         return spawnThread(std::static_pointer_cast<ThreadExpr>(expr));
+    case ExprKind::ChunkOpen: {
+        // `Chunk(N)` as a bare expression -- Form 1's opening half (spec
+        // §3.2). Produces an array-shaped Value carrying an empty
+        // ChunkHandle with N slots pre-sized; the kernel body is
+        // synthesized later, once every slot has been assigned a function
+        // name reference (see execute(ArrayAssign) and desugarChunkForm1).
+        auto co = std::static_pointer_cast<ChunkOpenExpr>(expr);
+        long long n = (long long)evalNumber(co->countExpr);
+        if(n <= 0) throw std::runtime_error("Chunk(N): N must be a positive integer");
+        Value v;
+        v.isArray = true;
+        v.ex().isChunk = true;
+        v.ex().chunkHandle = std::make_shared<ChunkHandle>();
+        v.ex().chunkHandle->n = n;
+        v.ex().chunkHandle->isForm1 = true;
+        v.ex().chunkHandle->pendingSlotFunctionNames.assign((size_t)n, std::string());
+        // array.size() == n so len(Work) (§3.2's `len(Work); // == N`) works
+        // unchanged through the existing len() path -- slots hold 0.0
+        // placeholders until desugarChunkForm1 replaces the handle's
+        // kernelBody at first .join()/.joinall().
+        v.array.assign((size_t)n, 0.0);
+        return v;
+    }
     case ExprKind::Join:
         return joinThread(std::static_pointer_cast<JoinExpr>(expr));
     case ExprKind::JoinAll:
@@ -5318,26 +7133,60 @@ Value evalToValue(const ExprPtr& expr) {
     case ExprKind::CloneCall: {
         // a.clone() -- an independent copy (%2.1). resolveVar() already
         // transparently unwraps a .ref()'d/mutable source to its live
-        // payload, and returning *that Value by value* here is an ordinary
-        // deep copy (Value has no shared/aliasing members for a plain
-        // array -- array is a plain std::vector<double>), so this is
-        // already fully independent of the source: mutating the clone can
-        // never affect the original, whether or not the original happens
-        // to be a .ref()/mutable handle itself.
+        // payload, and a plain array is a std::vector<double>, so copying
+        // it is already fully independent of the source.
+        //
+        // Struct support: `obj.data.clone()` (a struct member -- `target`
+        // is set) and `s.clone()` on a whole struct value. A struct Value's
+        // `fields` map lives behind a shared_ptr, so a plain `var b2 = b;`
+        // ALIASES every field (mutating b2.data[0] changes b.data[0]).
+        // deepCloneValue() gives .clone() the real independent-copy
+        // meaning there: fresh fields map, recursively cloned.
         auto c = static_cast<CloneCallExpr*>(expr.get());
+        if(c->target) {
+            Value src = evalToValue(c->target);
+            if(!src.isArray && !src.isStruct)
+                throw std::runtime_error("'.clone()' on a struct member requires an array or struct field");
+            return deepCloneValue(src);
+        }
         Value& src = resolveVar(c->arrayName);
-        if(!src.isArray)
-            throw std::runtime_error("'" + c->arrayName + "' is not an array -- .clone() is only defined for arrays");
-        return src; // returned by value -- a genuine independent copy
+        if(!src.isArray && !src.isStruct)
+            throw std::runtime_error("'" + c->arrayName + "' is not an array or struct -- .clone() is only defined for arrays and structs");
+        return deepCloneValue(src); // genuinely independent copy
     }
     case ExprKind::RefCall: {
         auto r = static_cast<RefCallExpr*>(expr.get());
+        if(r->target)
+            throw std::runtime_error("'.ref()' on a struct member is not supported yet -- take the reference on a plain array variable, or declare the field `mutable`");
         return makeRefHandle(r->arrayName);
+    }
+    case ExprKind::Shard: {
+        // Shard(Bundle.var) -- see ShardExpr. By now the Gather rewrite pass
+        // has turned `Alias.var` into a plain VarExpr named "<Bundle>::var".
+        auto sh = static_cast<ShardExpr*>(expr.get());
+        if(!sh->target || sh->target->kind != ExprKind::Var)
+            throw std::runtime_error("Shard(...) expects a gathered variable, e.g. Shard(Bundle.var), inside the Gather body of that Bundle");
+        const std::string& nm = static_cast<VarExpr*>(sh->target.get())->name;
+        Value out;
+        if(nm.find("::") == std::string::npos || !shardGatheredVar(nm, out))
+            throw std::runtime_error("Shard(" + nm + "): not a variable exported by a Bundle. Shard only accepts `Alias.var` for a var listed in a Bundle, written inside the matching Gather body");
+        return out;
     }
     case ExprKind::StringLit:
         return Value::makeString(static_cast<StringLitExpr*>(expr.get())->value);
+    case ExprKind::CharCast: {
+        auto cc = static_cast<CharCastExpr*>(expr.get());
+        if(cc->isArray) return Value::makeString(charCodesToString(evalToValue(cc->expr)));
+        Value v; v.number = evalNumber(expr); return v; // plain (char)x stays numeric, as documented
+    }
     case ExprKind::StringCast: {
         auto sc = static_cast<StringCastExpr*>(expr.get());
+        // (string)(char)x  -> the one-character string for code x
+        // (string)(char[])a -> falls through: (char[])a is already a string
+        if(sc->expr && sc->expr->kind == ExprKind::CharCast) {
+            auto cc = static_cast<CharCastExpr*>(sc->expr.get());
+            if(!cc->isArray) return Value::makeString(charCodeToString(evalNumber(cc->expr)));
+        }
         return Value::makeString(valueToDisplayString(evalToValue(sc->expr)));
     }
     case ExprKind::JsonObjectLit: {
@@ -5680,10 +7529,30 @@ Value evalMemberAccess(const std::shared_ptr<MemberAccessExpr>& m) {
         auto it = obj.cex().fields->find(m->member);
         if(it == obj.cex().fields->end())
             throw std::runtime_error("Struct '" + obj.cex().structType + "' has no field '" + m->member + "'");
-        Value field = it->second;
+        const Value& field = it->second; // by reference: indexing a big Matrix field must not copy it
         if(m->index) {
             if(!field.isArray)
                 throw std::runtime_error("Field '" + m->member + "' is not an array");
+            if(!field.dims.empty() || !m->extraIndices.empty()) {
+                // Matrix / Tensor field: obj.m[i][j]... A full index gives
+                // the element; a partial index (obj.m[i]) gives the
+                // sub-slice, exactly like indexing a local Matrix does.
+                if(field.dims.empty())
+                    throw std::runtime_error("Field '" + m->member + "' is not a Matrix/Tensor, but was indexed with " + std::to_string(1 + m->extraIndices.size()) + " indices");
+                std::vector<int> idx;
+                idx.push_back((int)evalNumber(m->index));
+                for(auto& e : m->extraIndices) idx.push_back((int)evalNumber(e));
+                if(idx.size() > field.dims.size())
+                    throw std::runtime_error("Too many indices for field '" + m->member + "' (has " + std::to_string(field.dims.size()) + " dimension(s))");
+                for(size_t i = 0; i < idx.size(); ++i)
+                    if(idx[i] < 0 || idx[i] >= field.dims[i])
+                        throw std::runtime_error("Tensor index out of bounds for field '" + m->member + "' at dimension " + std::to_string(i) + ": " + std::to_string(idx[i]));
+                if(idx.size() == field.dims.size()) {
+                    Value r; r.number = field.array[tensorFlatOffset(field.dims, idx)];
+                    return r;
+                }
+                return tensorSlice(field, idx);
+            }
             int idx = (int)evalNumber(m->index);
             if(idx < 0 || idx >= (int)field.array.size())
                 throw std::runtime_error("Array index out of bounds for field '" + m->member + "': " + std::to_string(idx));
@@ -5767,7 +7636,7 @@ Value spawnThread(const std::shared_ptr<ThreadExpr>& t) {
     // starting with a completely empty scope.
     auto globalSnapshot = snapshotGlobalScope();
 
-    record->worker = std::thread([record, fnCopy, functionsCopy, structsCopy, reg, regMtx, argVals, globalSnapshot]() mutable {
+    record->worker = std::thread([record, fnCopy, fnName, functionsCopy, structsCopy, reg, regMtx, argVals, globalSnapshot]() mutable {
         Interpreter worker(functionsCopy, structsCopy);
         worker.threadRegistry = reg;
         worker.registryMtx = regMtx;
@@ -5776,7 +7645,9 @@ Value spawnThread(const std::shared_ptr<ThreadExpr>& t) {
         bool errored = false;
         std::string errMsg;
         try {
-            result = worker.callFunction(fnCopy, const_cast<std::vector<Value>&>(argVals));
+            auto& argsRef = const_cast<std::vector<Value>&>(argVals);
+            if(fnName.find("::") == std::string::npos || !callGatheredCallable(fnName, argsRef, result))
+                result = worker.callFunction(fnCopy, argsRef);
         } catch(const std::exception& e) {
             errored = true;
             errMsg = e.what();
@@ -5797,6 +7668,135 @@ Value spawnThread(const std::shared_ptr<ThreadExpr>& t) {
     return handle;
 }
 
+// Builds the CnrGpuArg list for a Chunk's kernel launch, in the SAME order
+// CudaCodegen::generate() collected arrayRefs (both walk the same AST via
+// the same collection logic, so the order is guaranteed consistent without
+// needing to pass names explicitly across the boundary).
+void launchChunkKernel(const ChunkDecl& decl, ChunkHandle& handle) {
+    CudaCodegen collector;
+    collector.collectArrayRefsStmt(decl.kernelBody);
+
+    // Host-side arrays backing each cnr_<name> parameter must already be
+    // resident in this scope (per §2.3, arrays used inside a Chunk must not
+    // be .ref()-aliased -- that's checked earlier at the .ref() call site,
+    // not here). Copy their current contents into CnrGpuArg-owned buffers
+    // that outlive the compileOrLoadChunkKernel call.
+    std::vector<std::vector<double>> ownedBuffers;
+    std::vector<CnrGpuArg> args;
+    ownedBuffers.reserve(collector.arrayRefs.size());
+    args.reserve(collector.arrayRefs.size());
+    for(auto& name : collector.arrayRefs) {
+        Value& arr = resolveVar(name);
+        if(!arr.isArray)
+            throw std::runtime_error("Chunk kernel references '" + name + "', which is not an array in the enclosing scope.");
+        ownedBuffers.push_back(arr.array);
+        args.push_back(CnrGpuArg{ ownedBuffers.back().data(), (long long)ownedBuffers.back().size() });
+    }
+
+    std::string hash;
+    CompiledChunkKernel compiled;
+    try {
+        compiled = compileOrLoadChunkKernel(decl, *functions, hash);
+    } catch(GpuBuildError& e) {
+        handle.launchFailed = true;
+        handle.launchError = e.what();
+        throw std::runtime_error(std::string("Chunk build failed: ") + e.what());
+    }
+    handle.kernelHash = hash;
+    handle.dlHandle = compiled.dlHandle;
+
+    CnrGpuResult result = compiled.launch(args.empty() ? nullptr : args.data(), (int)args.size(), handle.n);
+    if(result.error_code != 0) {
+        handle.launchFailed = true;
+        handle.launchError = "CUDA error code " + std::to_string(result.error_code) + " during kernel launch/sync";
+        throw std::runtime_error("Chunk '" + decl.handleName + "': " + handle.launchError);
+    }
+    handle.results.assign(result.data, result.data + result.len);
+    handle.resultReady = true;
+    compiled.freeResult(result);
+}
+
+Value joinChunk(ChunkHandle& handle, long long index) {
+    std::lock_guard<std::mutex> lock(handle.syncMtx);
+    if(!handle.resultReady) {
+        if(handle.launchFailed)
+            throw std::runtime_error("Chunk error: " + handle.launchError);
+        // Eager-launch means this should already be true by the time a
+        // handle exists (launchChunkKernel runs synchronously inside
+        // execute(ChunkDecl) / desugarChunkForm1 before the handle is ever
+        // exposed to the scope) -- reaching here indicates an internal
+        // inconsistency, not a normal not-yet-launched state.
+        throw std::runtime_error("Chunk: .join() called before the kernel finished launching (internal error)");
+    }
+    if(index < 0 || index >= (long long)handle.results.size())
+        throw std::runtime_error("Chunk: .join() index out of bounds: " + std::to_string(index));
+    Value v;
+    v.number = handle.results[(size_t)index];
+    return v;
+}
+
+Value joinAllChunk(ChunkHandle& handle) {
+    std::lock_guard<std::mutex> lock(handle.syncMtx);
+    if(!handle.resultReady) {
+        if(handle.launchFailed)
+            throw std::runtime_error("Chunk error: " + handle.launchError);
+        throw std::runtime_error("Chunk: .joinall() called before the kernel finished launching (internal error)");
+    }
+    Value results;
+    results.isArray = true;
+    results.array = handle.results;
+    return results;
+}
+
+// Form 1's kernel body synthesis (spec §3.2/§11): builds
+// `switch(index) { case 0 { return taskA(); } case 1 { return taskB(); } ... }`
+// from the slot-to-function-name map recorded by execute(ArrayAssign), then
+// runs it through the exact same KernelSafeChecker + launchChunkKernel path
+// Form 2 uses -- Form 1 is sugar over Form 2, not a separate execution
+// mechanism, so from this point on there is no difference between the two.
+void desugarChunkForm1(const std::string& handleName, Value& handleVal) {
+    auto handle = handleVal.ex().chunkHandle;
+    if(!handle) throw std::runtime_error("'" + handleName + "' is not a Chunk handle");
+    if(handle->resultReady || handle->kernelBodyBuilt) return; // already launched, or already built (idempotent second .join()/.joinall())
+
+    for(size_t i = 0; i < handle->pendingSlotFunctionNames.size(); ++i) {
+        if(handle->pendingSlotFunctionNames[i].empty())
+            throw std::runtime_error("Chunk '" + handleName + "': slot " + std::to_string(i) + " was never assigned a function (Form 1 requires every slot to be set before .join()/.joinall(), spec §3.2).");
+    }
+
+    auto synthDecl = std::make_shared<ChunkDecl>();
+    synthDecl->handleName = handleName;
+    synthDecl->isForm1 = true;
+    auto body = std::make_shared<BlockStmt>();
+    auto sw = std::make_shared<SwitchStmt>();
+    sw->subject = std::make_shared<GpuIndexVarExpr>();
+    for(size_t i = 0; i < handle->pendingSlotFunctionNames.size(); ++i) {
+        SwitchCase c;
+        c.value = std::make_shared<NumberExpr>((double)i, std::to_string(i));
+        auto caseBody = std::make_shared<BlockStmt>();
+        auto ret = std::make_shared<ReturnStmt>();
+        auto call = std::make_shared<CallExpr>();
+        call->name = handle->pendingSlotFunctionNames[i];
+        ret->value = call;
+        caseBody->statements.push_back(ret);
+        c.body = caseBody;
+        sw->cases.push_back(c);
+    }
+    body->statements.push_back(sw);
+    synthDecl->kernelBody = body;
+
+    KernelSafeChecker checker(*functions);
+    if(!checker.check(synthDecl->kernelBody)) {
+        std::ostringstream msg;
+        msg << "Chunk '" << handleName << "' (Form 1) is not kernel-safe (CnR_SPEC.md §3.8):\n";
+        for(auto& v : checker.violations) msg << "  - " << v.message << "\n";
+        throw std::runtime_error(msg.str());
+    }
+
+    launchChunkKernel(*synthDecl, *handle);
+    handle->kernelBodyBuilt = true;
+}
+
 size_t resolveThreadHandle(const ExprPtr& handleExpr) {
     double idNum;
     if(std::dynamic_pointer_cast<ArrayAccessExpr>(handleExpr)) {
@@ -5815,6 +7815,20 @@ size_t resolveThreadHandle(const ExprPtr& handleExpr) {
 }
 
 Value joinThread(const std::shared_ptr<JoinExpr>& j) {
+    // Disambiguate Chunk vs. thread-array by inspecting the runtime Value
+    // (see ChunkDecl's comment on why `.join()`/`.joinall()` reuse the
+    // existing JoinExpr/JoinAllExpr AST nodes instead of separate ones).
+    // `Work[i].join()` on a Chunk: j->handleExpr is an ArrayAccessExpr whose
+    // arrayName resolves to a Chunk handle -- resolve the base array first
+    // to check, without double-evaluating the index expression.
+    if(auto aa = std::dynamic_pointer_cast<ArrayAccessExpr>(j->handleExpr)) {
+        Value& base = resolveVar(aa->arrayName);
+        if(base.ex().isChunk) {
+            if(base.ex().chunkHandle->isForm1) desugarChunkForm1(aa->arrayName, base);
+            long long idx = (long long)evalNumber(aa->index);
+            return joinChunk(*base.ex().chunkHandle, idx);
+        }
+    }
     size_t id = resolveThreadHandle(j->handleExpr);
     std::shared_ptr<ThreadRecord> record;
     {
@@ -5830,6 +7844,10 @@ Value joinThread(const std::shared_ptr<JoinExpr>& j) {
 
 Value joinAllThreads(const std::shared_ptr<JoinAllExpr>& ja) {
     Value& arr = resolveVar(ja->arrayName);
+    if(arr.ex().isChunk) {
+        if(arr.ex().chunkHandle->isForm1) desugarChunkForm1(ja->arrayName, arr);
+        return joinAllChunk(*arr.ex().chunkHandle);
+    }
     if(!arr.isArray)
         throw std::runtime_error("joinAll() called on '" + ja->arrayName + "', which is not an array");
     Value results;
@@ -5918,6 +7936,51 @@ Value callAppendFile(const std::vector<Value>& args) {
     return Value::makeBool2(true);
 }
 
+// sleep(ms) -- pause the calling thread (other CnR threads keep running).
+Value callSleep(const std::vector<Value>& args) {
+    if(args.size() != 1) throw std::runtime_error("sleep(ms) expects 1 argument");
+    double ms = valueToApproxDouble(args[0]);
+    if(ms < 0) ms = 0;
+    std::this_thread::sleep_for(std::chrono::microseconds((long long)(ms * 1000.0)));
+    return Value::makeBool2(true);
+}
+
+Value callLlamaStart(const std::vector<Value>& args) {
+    if(args.empty() || args.size() > 4) throw std::runtime_error("llamaStart(model [, port [, extraArgs [, timeoutSec]]])");
+    std::string model = requireStringArg(args, 0, "llamaStart");
+    int port = args.size() > 1 ? (int)valueToApproxDouble(args[1]) : 8080;
+    std::string extra = args.size() > 2 ? requireStringArg(args, 2, "llamaStart") : std::string();
+    int timeoutSec = args.size() > 3 ? (int)valueToApproxDouble(args[3]) : 180;
+    llamaStartServer(model, port, extra, timeoutSec);
+    return Value::makeBool2(true);
+}
+
+Value callLlamaConnect(const std::vector<Value>& args) {
+    if(args.size() != 1) throw std::runtime_error("llamaConnect(url) expects 1 argument");
+    llamaConnectServer(requireStringArg(args, 0, "llamaConnect"));
+    return Value::makeBool2(true);
+}
+
+Value callLlamaAsk(const std::vector<Value>& args) {
+    if(args.empty() || args.size() > 4) throw std::runtime_error("llamaAsk(prompt [, system [, maxTokens [, temperature]]])");
+    std::string prompt = requireStringArg(args, 0, "llamaAsk");
+    std::string sys = args.size() > 1 ? requireStringArg(args, 1, "llamaAsk") : std::string();
+    int maxTokens = args.size() > 2 ? (int)valueToApproxDouble(args[2]) : 512;
+    double temp = args.size() > 3 ? valueToApproxDouble(args[3]) : 0.3;
+    if(maxTokens < 1) maxTokens = 1;
+    return Value::makeString(llamaChat(prompt, sys, maxTokens, temp));
+}
+
+Value callLlamaRunning(const std::vector<Value>&) {
+    std::string base;
+    {
+        LlamaState& L = llamaState();
+        std::lock_guard<std::mutex> lock(L.mtx);
+        base = L.baseUrl;
+    }
+    return Value::makeBool2(!base.empty() && llamaHealthOk(base));
+}
+
 Value callFileExists(const std::vector<Value>& args) {
     std::string path = requireStringArg(args, 0, "fileExists");
     std::ifstream f(path);
@@ -5987,6 +8050,13 @@ Value callCallable(const std::string& name, const std::vector<ExprPtr>& argExprs
     argVals.reserve(argExprs.size());
     for(auto& a : argExprs) argVals.push_back(evalToValue(a));
 
+    // Gathered symbol ("<Bundle>::name", produced by the Gather rewrite pass):
+    // runs inside the Bundle's own module interpreter -- see BundleModule.
+    if(name.find("::") != std::string::npos) {
+        Value gathered;
+        if(callGatheredCallable(name, argVals, gathered)) return gathered;
+    }
+
     auto sIt = structs->find(name);
     if(sIt != structs->end()) return instantiateStruct(sIt->second, argVals);
 
@@ -5999,12 +8069,25 @@ Value callCallable(const std::string& name, const std::vector<ExprPtr>& argExprs
     if(name == "readFile") return callReadFile(argVals);
     if(name == "writeFile") return callWriteFile(argVals);
     if(name == "appendFile") return callAppendFile(argVals);
+    if(name == "sleep") return callSleep(argVals);
+    if(name == "llamaStart") return callLlamaStart(argVals);
+    if(name == "llamaConnect") return callLlamaConnect(argVals);
+    if(name == "llamaAsk") return callLlamaAsk(argVals);
+    if(name == "llamaStop") return Value::makeBool2(llamaStopServer());
+    if(name == "llamaRunning") return callLlamaRunning(argVals);
     if(name == "fileExists") return callFileExists(argVals);
     if(name == "currentDirectory") return callCurrentDirectory(argVals);
     if(name == "changeDirectory") return callChangeDirectory(argVals);
     if(name == "stringToChars") return callStringToChars(argVals);
     if(name == "charsToString") return callCharsToString(argVals);
 
+    {
+        auto dot = name.find('.');
+        if(dot != std::string::npos && g_knownBundleNames.count(name.substr(0, dot)))
+            throw std::runtime_error("Undefined function or struct '" + name + "' -- did you forget to Gather it? "
+                                      "'" + name.substr(0, dot) + "' is a Bundle; its symbols are only visible inside a "
+                                      "Gather(Bundle " + name.substr(0, dot) + " [as Alias]) { ... } block.");
+    }
     throw std::runtime_error("Undefined function or struct '" + name + "'");
 }
 
@@ -6030,6 +8113,26 @@ Value callFunction(const FunctionDecl& fn, std::vector<Value>& args) {
     return result;
 }
 
+// Whole-value assignment of an array / Matrix / Tensor into a struct's array
+// field -- `m = otherMatrix;` inside a constructor, or `obj.m = otherMatrix;`
+// from outside. The new value must have the same rank the field already has
+// (1-D array, 2-D Matrix, 3-D Tensor, ...), so a Matrix field can't silently
+// turn into a flat array or a Tensor. The field gets its own independent
+// copy of the data.
+void assignArrayToField(Value& field, Value nv, const std::string& fieldName) {
+    if(nv.cex().isMutableCell) nv = mutableRead(nv);
+    if(!nv.isArray)
+        throw std::runtime_error("Cannot assign a number to array field '" + fieldName + "'");
+    size_t fieldRank = field.dims.empty() ? 1 : field.dims.size();
+    size_t newRank   = nv.dims.size() <= 1 ? 1 : nv.dims.size();
+    if(fieldRank != newRank)
+        throw std::runtime_error("Field '" + fieldName + "' is a " + std::to_string(fieldRank) +
+                                  "-dimensional array but was assigned a " + std::to_string(newRank) + "-dimensional value");
+    if(nv.dims.size() == 1) nv.dims.clear(); // a row slice is just a plain 1-D array
+    if(nv.extra) nv.ex().bareArrayCopyPendingHint = false;
+    field = std::move(nv);
+}
+
 Value instantiateStruct(const StructDecl& sd, std::vector<Value>& args) {
     if(args.size() != sd.ctorParams.size())
         throw std::runtime_error("Struct '" + sd.name + "' constructor expects " + std::to_string(sd.ctorParams.size()) +
@@ -6041,6 +8144,14 @@ Value instantiateStruct(const StructDecl& sd, std::vector<Value>& args) {
     for(auto& f : sd.fields) {
         Value fv;
         fv.isArray = f.isArray;
+        // A Matrix/Tensor field starts out as an empty-but-shaped value
+        // (dims all 0), so the field already "knows" its rank before the
+        // constructor assigns real contents to it -- see assignArrayToField.
+        if(f.rank >= 2) fv.dims.assign((size_t)f.rank, 0);
+        if(f.hasInit) {
+            if(f.rank >= 2) fv = buildTensorFromLiteral(f.nestedInit);
+            else for(auto& e : f.initValues) fv.array.push_back(evalNumber(e));
+        }
         (*instance.cex().fields)[f.name] = fv;
     }
 
@@ -6155,6 +8266,15 @@ std::vector<uint8_t> serializeDatabase(const DatabaseInstance& db) {
                 } else if(fv.isBool) {
                     out.push_back(2);
                     out.push_back(fv.boolean ? 1 : 0);
+                } else if(fv.isArray && fv.dims.size() >= 2) {
+                    out.push_back(4); // Matrix/Tensor: rank, dims..., then row-major data
+                    writeU32(out, (uint32_t)fv.dims.size());
+                    for(int dm : fv.dims) writeU32(out, (uint32_t)dm);
+                    writeU32(out, (uint32_t)fv.array.size());
+                    for(double d : fv.array) {
+                        uint64_t bits; std::memcpy(&bits, &d, 8);
+                        for(int i=7;i>=0;--i) out.push_back((uint8_t)(bits >> (i*8)));
+                    }
                 } else if(fv.isArray) {
                     out.push_back(3);
                     writeU32(out, (uint32_t)fv.array.size());
@@ -6213,6 +8333,19 @@ void deserializeDatabase(DatabaseInstance& db, const std::vector<uint8_t>& in) {
                     fv.array.reserve(count);
                     for(uint32_t e=0; e<count; ++e) {
                         if(pos+8 > in.size()) throw std::runtime_error("Corrupt database file (truncated array element)");
+                        uint64_t bits = 0;
+                        for(int i=0;i<8;++i) bits = (bits<<8) | in[pos++];
+                        double d; std::memcpy(&d, &bits, 8);
+                        fv.array.push_back(d);
+                    }
+                } else if(tag==4) {
+                    fv.isArray = true;
+                    uint32_t rank = readU32(in, pos);
+                    for(uint32_t k=0; k<rank; ++k) fv.dims.push_back((int)readU32(in, pos));
+                    uint32_t count = readU32(in, pos);
+                    fv.array.reserve(count);
+                    for(uint32_t e=0; e<count; ++e) {
+                        if(pos+8 > in.size()) throw std::runtime_error("Corrupt database file (truncated matrix element)");
                         uint64_t bits = 0;
                         for(int i=0;i<8;++i) bits = (bits<<8) | in[pos++];
                         double d; std::memcpy(&d, &bits, 8);
@@ -6988,6 +9121,43 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
     // identified by profiling). Each case body is unchanged from the
     // original; only the cast mechanism changed.
     switch(stmt->kind) {
+    case StmtKind::ChunkDecl: {
+        // `Chunk Work(N) { ... }` (Form 2, spec §3.3). Eager launch: this
+        // first implementation compiles and launches the kernel right here,
+        // not lazily on first .join()/.joinall() -- see ChunkHandle's
+        // comment for why that's a valid reading of §3.4. Form 1's
+        // `var[] Work = Chunk(N);` never reaches this case (it's a VarDecl
+        // whose value is a ChunkOpenExpr, handled in evalToValue/VarDecl
+        // execution instead) -- this case only ever sees Form 2's
+        // `Chunk Name(N) { ... }` statement shape.
+        auto s = static_cast<ChunkDecl*>(stmt.get());
+
+        KernelSafeChecker checker(*functions);
+        if(!checker.check(s->kernelBody)) {
+            std::ostringstream msg;
+            msg << "Chunk '" << s->handleName << "' body is not kernel-safe (CnR_SPEC.md §3.8):\n";
+            for(auto& v : checker.violations) msg << "  - " << v.message << "\n";
+            throw std::runtime_error(msg.str());
+        }
+
+        long long n = (long long)evalNumber(s->countExpr);
+        if(n <= 0) throw std::runtime_error("Chunk '" + s->handleName + "': N must be a positive integer");
+
+        auto handle = std::make_shared<ChunkHandle>();
+        handle->n = n;
+        launchChunkKernel(*s, *handle);
+
+        Value v;
+        v.isArray = true;
+        v.ex().isChunk = true;
+        v.ex().chunkHandle = handle;
+        // Slots exposed as a plain numeric array of size N for anything
+        // that inspects the handle before .join()/.joinall() (e.g. len());
+        // actual per-slot results only populate after a sync (§3.4).
+        v.array.assign((size_t)n, 0.0);
+        scopes.back()[s->handleName] = v;
+        return ExecResult::Normal;
+    }
     case StmtKind::TryCatch: {
         auto s = static_cast<TryCatchStmt*>(stmt.get());
         // A `return;` inside a try block still returns from the enclosing
@@ -7131,11 +9301,12 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         } else if(s->arrayFromExpr) {
             // `var[] b = <expr>;` where <expr> isn't a `{...}` literal --
             // bare assignment from another array (`var[] b = a;`),
-            // `.clone()`, `.ref()`, or an array-returning call (see
-            // parseVarDecl / CnR_SPEC.md %2.1). Whatever the expression
-            // evaluates to, it must actually be an array (or, for .ref(),
-            // an array-backed mutable-cell handle -- RefCallExpr's own
-            // evalToValue case already validated that at the source).
+            // `.clone()`, `.ref()`, an array-returning call, or `Chunk(N)`
+            // (Form 1's opening half, spec §3.2 -- produces an
+            // already-array-shaped Value via evalToValue's ChunkOpen case,
+            // so it needs no special handling here beyond skipping the
+            // ordinary "must be an array" validation path below, which it
+            // already satisfies since isArray=true was set there).
             value = evalToValue(s->value);
             bool isRefHandle = value.cex().isMutableCell;
             if(!isRefHandle && !value.isArray)
@@ -7155,7 +9326,21 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
             // s->isMutable branch) would double-box it, which is handled
             // separately below.
         } else if(s->isArray) {
-            for(auto& e : s->arrayValues) value.array.push_back(evalNumber(e));
+            // Elements may be numbers OR strings/objects/null (e.g. `var r[] = {0, "txt", id};`):
+            // non-numeric ones go to the parallel object slot, like push() does.
+            for(auto& e : s->arrayValues) {
+                Value ev = evalToValue(e);
+                bool slot = ev.isString || ev.isObject || ev.isStruct || ev.isNull;
+                if(slot) {
+                    ensureObjectSlots(value);
+                    value.array.push_back(0.0);
+                    value.ex().objectArray->push_back(ev);
+                } else {
+                    if(ev.isArray) throw std::runtime_error("Array literal element cannot itself be an array (use var[][] for Matrix/Tensor)");
+                    value.array.push_back(ev.isBool ? (ev.boolean ? 1.0 : 0.0) : valueToApproxDouble(ev));
+                    if(value.cex().objectArray) value.ex().objectArray->push_back(Value());
+                }
+            }
         } else {
             value = evalToValue(s->value);
         }
@@ -7203,8 +9388,17 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
             return ExecResult::Normal;
         }
         Value& val = resolveVar(s->name);
-        if(val.isArray)
+        if(val.isArray) {
+            // Whole-array assignment is only allowed onto a struct FIELD
+            // (e.g. `m = data;` in a constructor); a plain local array still
+            // needs `var[] b = a;` / .clone() / .ref() as before.
+            if(currentSelf && currentSelf->cex().fields && currentSelf->cex().fields->count(s->name)) {
+                Value nv = evalToValue(s->value);
+                assignArrayToField(val, std::move(nv), s->name);
+                return ExecResult::Normal;
+            }
             throw std::runtime_error("Cannot assign a number to array '" + s->name + "'");
+        }
         Value newVal = evalToValue(s->value);
         val = std::move(newVal);
         return ExecResult::Normal;
@@ -7214,6 +9408,29 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         Value& val = resolveVar(s->arrayName);
         if(!val.isArray)
             throw std::runtime_error("'" + s->arrayName + "' is not an array");
+        // Form 1 Chunk slot assignment: `Work[i] = taskA;` (spec §3.2) --
+        // `taskA` is a bare name reference to an already-declared top-level
+        // function (no parens; see ChunkDecl's comment on why CnR uses
+        // named references instead of anonymous function literals here).
+        // Recorded into the handle's pendingSlotFunctionNames; the actual
+        // kernel body isn't synthesized until first .join()/.joinall() on
+        // this handle (see desugarChunkForm1), so this is just bookkeeping.
+        if(val.ex().isChunk && val.ex().chunkHandle && val.ex().chunkHandle->isForm1) {
+            if(s->indices.empty() && s->index) {
+                auto varRef = std::dynamic_pointer_cast<VarExpr>(s->value);
+                if(!varRef)
+                    throw std::runtime_error("'" + s->arrayName + "[i] = ...': Chunk Form 1 slots must be assigned a bare function name (e.g. Work[0] = taskA;), not an expression -- CnR has no anonymous function literals (spec §3.2).");
+                if(functions->find(varRef->name) == functions->end())
+                    throw std::runtime_error("'" + s->arrayName + "[i] = " + varRef->name + "': '" + varRef->name + "' is not a declared function.");
+                int idx = (int)evalNumber(s->index);
+                auto& slots = val.ex().chunkHandle->pendingSlotFunctionNames;
+                if(idx < 0 || idx >= (int)slots.size())
+                    throw std::runtime_error("Chunk slot index out of bounds for '" + s->arrayName + "': " + std::to_string(idx));
+                slots[idx] = varRef->name;
+                return ExecResult::Normal;
+            }
+            throw std::runtime_error("'" + s->arrayName + "': Chunk Form 1 slots do not support Matrix/Tensor-style multi-index assignment.");
+        }
         maybeWarnBareArrayMutation(val, s->arrayName);
         if(!s->indices.empty()) {
             if(val.dims.empty())
@@ -7230,8 +9447,49 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
             throw std::runtime_error("'" + s->arrayName + "' is a Matrix/Tensor and needs " + std::to_string(val.dims.size()) + " index/indices, e.g. " + s->arrayName + "[" + std::to_string(index) + "]" + std::string(val.dims.size()>1 ? "[...]" : "") + " = value;");
         if(index < 0 || index >= (int)val.array.size())
             throw std::runtime_error("Array index out of bounds for '" + s->arrayName + "': " + std::to_string(index));
-        val.array[index] = evalNumber(s->value);
+        {
+            // arr[i] = value; -- numbers go in `array`; strings / bools / objects /
+            // null go in the parallel object slot (same representation push() uses),
+            // so `names[i] = "text";` works the same as `names.push("text");`.
+            Value nv = evalToValue(s->value);
+            if(nv.isString || nv.isObject || nv.isStruct || nv.isNull) {
+                ensureObjectSlots(val);
+                val.array[index] = 0.0; // placeholder keeps array.size() in sync
+                (*val.ex().objectArray)[index] = nv;
+            } else {
+                if(nv.isArray)
+                    throw std::runtime_error("Cannot assign an array to element " + std::to_string(index) + " of '" + s->arrayName + "'");
+                val.array[index] = nv.isBool ? (nv.boolean ? 1.0 : 0.0) : valueToApproxDouble(nv);
+                if(val.cex().objectArray && index < (int)val.cex().objectArray->size())
+                    (*val.ex().objectArray)[index] = Value(); // clear any old string/object in this slot
+            }
+        }
         return ExecResult::Normal;
+    }
+    case StmtKind::ChainAssign: {
+        auto s = static_cast<ChainAssignStmt*>(stmt.get());
+        auto m = static_cast<MemberAccessExpr*>(s->target.get());
+        // Evaluate everything before the last hop to the live struct (reference
+        // semantics: the Value shares the field table with the original), then
+        // reuse the ordinary field-assignment logic on it via a temp name.
+        Value baseVal = evalToValue(m->base);
+        auto tmp = std::make_shared<MemberAssignStmt>();
+        tmp->objectName = "__chain_base";
+        tmp->member = m->member;
+        if(!m->extraIndices.empty()) {
+            tmp->indices.push_back(m->index);
+            for(auto& x : m->extraIndices) tmp->indices.push_back(x);
+        } else {
+            tmp->index = m->index;
+        }
+        tmp->value = s->value;
+        scopes.push_back({});
+        scopes.back()["__chain_base"] = baseVal;
+        ExecResult r;
+        try { r = execute(tmp, returnValue); }
+        catch(...) { scopes.pop_back(); throw; }
+        scopes.pop_back();
+        return r;
     }
     case StmtKind::MemberAssign: {
         auto s = static_cast<MemberAssignStmt*>(stmt.get());
@@ -7259,24 +9517,36 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
         if(it == obj.cex().fields->end())
             throw std::runtime_error("Struct '" + obj.cex().structType + "' has no field '" + s->member + "'");
         Value& field = it->second;
-        if(s->index) {
+        if(!s->indices.empty()) {
+            // obj.m[i][j] = v;  (Matrix/Tensor field, element assignment)
+            if(!field.isArray || field.dims.empty())
+                throw std::runtime_error("Field '" + s->member + "' is not a Matrix/Tensor, but was indexed with " + std::to_string(s->indices.size()) + " indices");
+            std::vector<int> idx;
+            for(auto& e : s->indices) idx.push_back((int)evalNumber(e));
+            tensorSetScalar(field, idx, evalNumber(s->value));
+        } else if(s->index) {
             if(!field.isArray)
                 throw std::runtime_error("Field '" + s->member + "' is not an array");
+            if(!field.dims.empty())
+                throw std::runtime_error("Field '" + s->member + "' is a Matrix/Tensor and needs " + std::to_string(field.dims.size()) + " indices, e.g. " + s->objectName + "." + s->member + "[i][j] = value;");
             int idx = (int)evalNumber(s->index);
             if(idx < 0 || idx >= (int)field.array.size())
                 throw std::runtime_error("Array index out of bounds for field '" + s->member + "': " + std::to_string(idx));
             field.array[idx] = evalNumber(s->value);
         } else {
-            if(field.isArray)
-                throw std::runtime_error("Cannot assign a number to array field '" + s->member + "'");
             Value newVal = evalToValue(s->value);
-            field = std::move(newVal);
+            if(field.isArray) assignArrayToField(field, std::move(newVal), s->member);
+            else field = std::move(newVal);
         }
         return ExecResult::Normal;
     }
     case StmtKind::Print: {
         auto s = static_cast<PrintStmt*>(stmt.get());
         if(s->printCharArray) {
+            if(s->expr) {   // print((char[])<any array expression>)
+                std::cout << charCodesToString(evalToValue(s->expr)) << '\n';
+                return ExecResult::Normal;
+            }
             auto& arr = resolveVar(s->arrayName).array;
             for(double c : arr) std::cout << (char)c;
             std::cout << '\n';
@@ -7386,23 +9656,110 @@ ExecResult execute(const StmtPtr& stmt, Value& returnValue)
 // exactly once no matter how many files Gather it (see g_bundleModuleCache),
 // matching ordinary "a module's top level runs once" semantics.
 void computeBundleModuleVars(BundleModule& mod, const std::string& bundleName) {
+    std::lock_guard<std::recursive_mutex> lock(mod.callMtx);
     if(mod.varsComputed) return;
     mod.varsComputed = true;
 
-    Interpreter modInterp(mod.program.functions, mod.program.structs, mod.program.datas);
+    // Kept alive in mod.interp (not a local) so exported functions and
+    // struct constructors can run inside it later -- see callGatheredCallable.
+    mod.interp = std::make_shared<Interpreter>(mod.program.functions, mod.program.structs, mod.program.datas);
+    Interpreter& modInterp = *mod.interp;
     Value discarded;
+    seedImplicitBundleVars(modInterp, mod.program); // the module may itself use `Other.sym` directly
     for(auto& stmt : mod.program.statements) modInterp.execute(stmt, discarded);
 
     const BundleDecl& bundle = mod.program.bundles.at(bundleName);
     Scope& g = modInterp.scopes.front();
     for(auto& sym : bundle.exportedSymbols) {
         if(mod.exportedFunctions.count(bundleName + "::" + sym)) continue; // already handled as a function
+        if(mod.exportedStructs.count(bundleName + "::" + sym)) continue;   // ... or as a struct
+        auto shIt = bundle.shardAliases.find(sym);
+        if(shIt != bundle.shardAliases.end()) {
+            // `Shard(local) Alias;` -- live shared var, resolved lazily by
+            // shardAliasHandle(); only validate that the owner var exists.
+            if(!g.find(shIt->second))
+                throw std::runtime_error("Bundle '" + bundleName + "' declares Shard(" + shIt->second + ") but no such var is defined in '" + mod.sourcePath + "'");
+            continue;
+        }
         Value* v = g.find(sym);
         if(!v)
             throw std::runtime_error("Bundle '" + bundleName + "' exports '" + sym +
                                       "' but no such var or function is defined in '" + mod.sourcePath + "'");
         mod.exportedVars.push_back({bundleName + "::" + sym, *v});
     }
+}
+
+bool callGatheredCallable(const std::string& mangledName, std::vector<Value>& args, Value& out) {
+    auto it = g_gatheredCallables.find(mangledName);
+    if(it == g_gatheredCallables.end()) return false;
+    const GatheredCallable& gc = it->second;
+    BundleModule& mod = *gc.mod;
+    computeBundleModuleVars(mod, gc.bundleName); // no-op after the first time
+    std::lock_guard<std::recursive_mutex> lock(mod.callMtx);
+    Interpreter& mi = *mod.interp;
+    if(gc.isStruct) {
+        auto sIt = mi.structs->find(gc.symbol);
+        if(sIt == mi.structs->end())
+            throw std::runtime_error("Gather: struct '" + gc.symbol + "' vanished from Bundle '" + gc.bundleName + "'");
+        out = mi.instantiateStruct(sIt->second, args);
+    } else {
+        auto fIt = mi.functions->find(gc.symbol);
+        if(fIt == mi.functions->end())
+            throw std::runtime_error("Gather: function '" + gc.symbol + "' vanished from Bundle '" + gc.bundleName + "'");
+        out = mi.callFunction(fIt->second, args);
+    }
+    return true;
+}
+
+bool shardGatheredVar(const std::string& mangledName, Value& out) {
+    auto sep = mangledName.find("::");
+    if(sep == std::string::npos) return false;
+    std::string bundleName = mangledName.substr(0, sep);
+    std::string sym = mangledName.substr(sep + 2);
+    auto it = g_bundleModulesByName.find(bundleName);
+    if(it == g_bundleModulesByName.end()) return false;
+    BundleModule& mod = *it->second;
+    computeBundleModuleVars(mod, bundleName); // no-op after the first time
+    // `Shard(local) Alias;` -- the exported name may differ from the owner's var.
+    std::string localName = sym;
+    {
+        auto bIt = mod.program.bundles.find(bundleName);
+        if(bIt != mod.program.bundles.end()) {
+            auto aIt = bIt->second.shardAliases.find(sym);
+            if(aIt != bIt->second.shardAliases.end()) localName = aIt->second;
+        }
+    }
+    // Same lock every call into the module's interpreter takes, so the slot
+    // is never swapped while exported module code is running.
+    std::lock_guard<std::recursive_mutex> lock(mod.callMtx);
+    if(!mod.interp)
+        throw std::runtime_error("Shard(" + mangledName + "): module '" + bundleName + "' is not running yet");
+    Value* slot = mod.interp->scopes.front().find(localName);
+    if(!slot)
+        throw std::runtime_error("Shard(" + mangledName + "): '" + localName + "' is not a variable of Bundle '" + bundleName +
+                                  "' (or it is not declared yet when it is first used; functions and Structs cannot be sharded -- only vars)");
+    if(!slot->cex().isMutableCell) {
+        // First Shard of this var: box the module's value into a cell and
+        // REPLACE the module's own slot with the handle, so the module's
+        // code (bump(), etc.) and every Shard holder now share one storage.
+        Value boxed = Value::makeMutableCell(std::move(*slot));
+        boxed.ex().isShardHandle = true;
+        *slot = boxed;
+    }
+    out = *slot; // a copy of the handle -- aliases the same cell
+    return true;
+}
+
+bool shardAliasHandle(const std::string& mangledName, Value& out) {
+    auto sep = mangledName.find("::");
+    if(sep == std::string::npos) return false;
+    std::string bundleName = mangledName.substr(0, sep);
+    std::string sym = mangledName.substr(sep + 2);
+    auto it = g_bundleModulesByName.find(bundleName);
+    if(it == g_bundleModulesByName.end()) return false;
+    auto bIt = it->second->program.bundles.find(bundleName);
+    if(bIt == it->second->program.bundles.end() || !bIt->second.shardAliases.count(sym)) return false;
+    return shardGatheredVar(mangledName, out);
 }
 
 // Rewrites every reference to a gathered symbol inside `stmt`'s subtree
@@ -7430,83 +9787,197 @@ void rewriteGatheredRefsInBlock(const std::shared_ptr<BlockStmt>& block, const s
     for(auto& s : block->statements) rewriteGatheredRefsInStmt(s, alias, bundleName, exportedNames);
 }
 
+// Prefixes `name` with "<Bundle>::" when it is one of this Bundle's exported
+// symbols. Used for every place a bare symbol name can appear (variable
+// reads, array names, called functions/struct constructors, thread targets).
+static bool g_gatherQualifiedOnly = false; // implicit pass: only rewrite `Bundle.sym`, never bare names
+static inline void gatherMangle(std::string& name, const std::string& bundleName,
+                                const std::unordered_set<std::string>& exportedNames) {
+    if(g_gatherQualifiedOnly) return;
+    if(exportedNames.count(name)) name = bundleName + "::" + name;
+}
+
 void rewriteGatheredRefsInExpr(ExprPtr& expr, const std::string& alias, const std::string& bundleName,
                                 const std::unordered_set<std::string>& exportedNames) {
     if(!expr) return;
+    // Local shorthands so every case below stays one line per child.
+    auto E = [&](ExprPtr& e) { rewriteGatheredRefsInExpr(e, alias, bundleName, exportedNames); };
+    auto M = [&](std::string& n) { gatherMangle(n, bundleName, exportedNames); };
     switch(expr->kind) {
     case ExprKind::Call: {
         auto c = static_cast<CallExpr*>(expr.get());
-        // Qualified call, e.g. `Ex.sum(1,1)` -- parsed as a CallExpr whose
-        // name is literally "Ex.sum" (see parseCall's Gather-qualified-call
-        // branch). Only rewrite when the alias matches *this* Gather's
-        // alias and "sum" is actually one of its exported symbols --
-        // otherwise leave it alone (it isn't this Gather's to rewrite; some
-        // other enclosing Gather, if any, is responsible for it).
+        // Qualified call, e.g. `Ex.sum(1,1)` or `Ex.Point(1,2)` -- parsed as
+        // a CallExpr whose name is literally "Ex.sum" (see
+        // Parser::parseQualifiedCall). Only rewritten when the qualifier is
+        // *this* Gather's alias and the member is one of its exported
+        // symbols (function OR struct constructor) -- otherwise left alone,
+        // it isn't this Gather's to rewrite.
         auto dot = c->name.find('.');
         if(dot != std::string::npos) {
             std::string qualifier = c->name.substr(0, dot);
             std::string member = c->name.substr(dot + 1);
-            if(qualifier == alias && exportedNames.count(member)) {
-                c->name = bundleName + "::" + member;
-            }
-        } else if(exportedNames.count(c->name)) {
-            // Bare (unaliased) call, valid when alias == bundleName (%1.4).
-            c->name = bundleName + "::" + c->name;
+            if(qualifier == alias && exportedNames.count(member)) c->name = bundleName + "::" + member;
+        } else {
+            M(c->name); // bare call, valid when alias == bundleName (%1.4)
         }
-        for(auto& a : c->args) rewriteGatheredRefsInExpr(a, alias, bundleName, exportedNames);
+        for(auto& a : c->args) E(a);
         break;
     }
-    case ExprKind::Var: {
-        auto v = static_cast<VarExpr*>(expr.get());
-        if(exportedNames.count(v->name)) v->name = bundleName + "::" + v->name;
+    case ExprKind::Var:
+        M(static_cast<VarExpr*>(expr.get())->name);
         break;
-    }
     case ExprKind::MemberAccess: {
-        // `Alias.sym` -- written as a MemberAccessExpr whose base is a
-        // VarExpr named exactly `alias`. Rewritten in place into a plain
-        // VarExpr (for a gathered var) or left for the enclosing CallExpr
-        // to rewrite (a MemberAccessExpr is never itself a call in this
-        // grammar -- `Ex.sum(1,1)` parses as a CallExpr, see below).
+        // `Alias.sym` / `Alias.sym[i]` / `Alias.sym[i][j]` -- a MemberAccessExpr
+        // whose base is a VarExpr named exactly `alias`. This is a gathered
+        // *variable* (a gathered function/struct is always a CallExpr). It is
+        // rewritten into the plain-variable form the interpreter already
+        // understands, KEEPING its indices: a bare VarExpr for `Alias.sym`,
+        // an ArrayAccessExpr for `Alias.sym[i]`, a TensorAccessExpr for
+        // `Alias.sym[i][j]...`.
         auto m = static_cast<MemberAccessExpr*>(expr.get());
         if(m->base && m->base->kind == ExprKind::Var) {
             auto baseVar = static_cast<VarExpr*>(m->base.get());
             if(baseVar->name == alias && exportedNames.count(m->member)) {
-                expr = std::make_shared<VarExpr>(bundleName + "::" + m->member);
+                std::string mangled = bundleName + "::" + m->member;
+                if(!m->index) {
+                    expr = std::make_shared<VarExpr>(mangled);
+                } else if(m->extraIndices.empty()) {
+                    E(m->index);
+                    expr = std::make_shared<ArrayAccessExpr>(mangled, m->index);
+                } else {
+                    auto ta = std::make_shared<TensorAccessExpr>();
+                    ta->arrayName = mangled;
+                    E(m->index);
+                    ta->indices.push_back(m->index);
+                    for(auto& x : m->extraIndices) { E(x); ta->indices.push_back(x); }
+                    expr = ta;
+                }
                 return;
             }
         }
-        rewriteGatheredRefsInExpr(m->base, alias, bundleName, exportedNames);
-        if(m->index) rewriteGatheredRefsInExpr(m->index, alias, bundleName, exportedNames);
+        E(m->base);
+        E(m->index);
+        for(auto& x : m->extraIndices) E(x);
         break;
     }
     case ExprKind::Binary: {
         auto b = static_cast<BinaryExpr*>(expr.get());
-        rewriteGatheredRefsInExpr(b->left, alias, bundleName, exportedNames);
-        rewriteGatheredRefsInExpr(b->right, alias, bundleName, exportedNames);
+        E(b->left); E(b->right);
         break;
     }
-    case ExprKind::Unary: {
-        auto u = static_cast<UnaryExpr*>(expr.get());
-        rewriteGatheredRefsInExpr(u->expr, alias, bundleName, exportedNames);
+    case ExprKind::Unary:       E(static_cast<UnaryExpr*>(expr.get())->expr); break;
+    case ExprKind::CharCast:    E(static_cast<CharCastExpr*>(expr.get())->expr); break;
+    case ExprKind::StringCast:  E(static_cast<StringCastExpr*>(expr.get())->expr); break;
+    case ExprKind::IntCast:     E(static_cast<IntCastExpr*>(expr.get())->expr); break;
+    case ExprKind::LongCast:    E(static_cast<LongCastExpr*>(expr.get())->expr); break;
+    case ExprKind::FloatCast:   E(static_cast<FloatCastExpr*>(expr.get())->expr); break;
+    case ExprKind::BigIntCast:  E(static_cast<BigIntCastExpr*>(expr.get())->expr); break;
+    case ExprKind::BigFloatCast: {
+        auto c = static_cast<BigFloatCastExpr*>(expr.get());
+        E(c->expr); E(c->precisionExpr);
         break;
     }
+    case ExprKind::JsonObjectLit: {
+        auto o = static_cast<JsonObjectLitExpr*>(expr.get());
+        for(auto& kv : o->entries) { E(kv.first); E(kv.second); }
+        break;
+    }
+    case ExprKind::HttpCall: {
+        auto h = static_cast<HttpCallExpr*>(expr.get());
+        E(h->url);
+        for(auto& kv : h->headers) { E(kv.first); E(kv.second); }
+        E(h->bodyExpr);
+        break;
+    }
+    case ExprKind::Len: {
+        auto l = static_cast<LenExpr*>(expr.get());
+        if(l->operand) E(l->operand);
+        else M(l->arrayName);
+        break;
+    }
+    case ExprKind::ArrayAccess: {
+        auto a = static_cast<ArrayAccessExpr*>(expr.get());
+        M(a->arrayName); E(a->index);
+        break;
+    }
+    case ExprKind::TensorAccess: {
+        auto t = static_cast<TensorAccessExpr*>(expr.get());
+        M(t->arrayName);
+        for(auto& x : t->indices) E(x);
+        break;
+    }
+    case ExprKind::Thread: {
+        auto t = static_cast<ThreadExpr*>(expr.get());
+        // `thread(sum, 1, 2)` inside a Gather body -> thread(Bundle::sum, ...);
+        // `thread(Alias.sum, 1, 2)` likewise.
+        auto dot = t->fnName.find('.');
+        if(dot == std::string::npos) M(t->fnName);
+        else if(t->fnName.substr(0, dot) == alias && exportedNames.count(t->fnName.substr(dot + 1)))
+            t->fnName = bundleName + "::" + t->fnName.substr(dot + 1);
+        for(auto& a : t->args) E(a);
+        break;
+    }
+    case ExprKind::Join:        E(static_cast<JoinExpr*>(expr.get())->handleExpr); break;
+    case ExprKind::ArrayMethodCall: {
+        auto a = static_cast<ArrayMethodCallExpr*>(expr.get());
+        M(a->arrayName); E(a->arg);
+        break;
+    }
+    case ExprKind::CloneCall: {
+        auto c = static_cast<CloneCallExpr*>(expr.get());
+        M(c->arrayName); E(c->target);
+        break;
+    }
+    case ExprKind::RefCall: {
+        auto r = static_cast<RefCallExpr*>(expr.get());
+        M(r->arrayName); E(r->target);
+        break;
+    }
+    case ExprKind::Shard:       E(static_cast<ShardExpr*>(expr.get())->target); break;
+    case ExprKind::Throw:       E(static_cast<ThrowExpr*>(expr.get())->messageExpr); break;
+    case ExprKind::ServerConfig: {
+        auto c = static_cast<ServerConfigExpr*>(expr.get());
+        for(auto& kv : c->entries) E(kv.second);
+        break;
+    }
+    case ExprKind::ObjectMethodCall: {
+        auto o = static_cast<ObjectMethodCallExpr*>(expr.get());
+        for(auto& a : o->args) E(a);
+        break;
+    }
+    case ExprKind::DbMethodCall: {
+        auto d = static_cast<DbMethodCallExpr*>(expr.get());
+        for(auto& a : d->args) E(a);
+        break;
+    }
+    case ExprKind::MutexMethodCall: E(static_cast<MutexMethodCallExpr*>(expr.get())->base); break;
+    case ExprKind::ChunkOpen:       E(static_cast<ChunkOpenExpr*>(expr.get())->countExpr); break;
     default:
-        // Every other ExprKind (literals, Thread/Join/ArrayMethodCall/...)
-        // either can't syntactically contain a bare Gather-qualified
-        // reference or is out of scope for the symbols Bundle can export
-        // (functions and vars only) -- left unchanged.
+        // Number, Bool, StringLit, JoinAll, Fail, MutexNew, GpuIndexVar:
+        // leaves with nothing inside them to rewrite.
         break;
     }
+}
+
+static void rewriteGatheredNestedLit(const std::shared_ptr<NestedArrayLitExpr>& n, const std::string& alias,
+                                     const std::string& bundleName, const std::unordered_set<std::string>& exportedNames) {
+    if(!n) return;
+    for(auto& e : n->leafValues) rewriteGatheredRefsInExpr(e, alias, bundleName, exportedNames);
+    for(auto& c : n->children) rewriteGatheredNestedLit(c, alias, bundleName, exportedNames);
 }
 
 void rewriteGatheredRefsInStmt(StmtPtr& stmt, const std::string& alias, const std::string& bundleName,
                                 const std::unordered_set<std::string>& exportedNames) {
     if(!stmt) return;
+    auto E = [&](ExprPtr& e) { rewriteGatheredRefsInExpr(e, alias, bundleName, exportedNames); };
+    auto B = [&](const std::shared_ptr<BlockStmt>& b) { rewriteGatheredRefsInBlock(b, alias, bundleName, exportedNames); };
+    auto M = [&](std::string& n) { gatherMangle(n, bundleName, exportedNames); };
     switch(stmt->kind) {
     case StmtKind::VarDecl: {
         auto s = static_cast<VarDeclStmt*>(stmt.get());
-        rewriteGatheredRefsInExpr(s->value, alias, bundleName, exportedNames);
-        for(auto& e : s->arrayValues) rewriteGatheredRefsInExpr(e, alias, bundleName, exportedNames);
+        E(s->value);
+        for(auto& e : s->arrayValues) E(e);
+        rewriteGatheredNestedLit(s->nestedInit, alias, bundleName, exportedNames);
         break;
     }
     case StmtKind::Assign: {
@@ -7515,122 +9986,132 @@ void rewriteGatheredRefsInStmt(StmtPtr& stmt, const std::string& alias, const st
         // reachable when alias == bundleName, i.e. the no-alias form --
         // %1.4) -- rewrite the assignment target to the mangled name too,
         // mirroring the read-side VarExpr case.
-        if(exportedNames.count(s->name)) s->name = bundleName + "::" + s->name;
-        rewriteGatheredRefsInExpr(s->value, alias, bundleName, exportedNames);
+        M(s->name);
+        E(s->value);
+        break;
+    }
+    case StmtKind::ArrayAssign: {
+        auto s = static_cast<ArrayAssignStmt*>(stmt.get());
+        M(s->arrayName);
+        E(s->index);
+        for(auto& x : s->indices) E(x);
+        E(s->value);
+        break;
+    }
+    case StmtKind::ChainAssign: {
+        auto s = static_cast<ChainAssignStmt*>(stmt.get());
+        E(s->target);
+        E(s->value);
         break;
     }
     case StmtKind::MemberAssign: {
-        // `Alias.member = expr;` -- parsed as a MemberAssignStmt (the
+        // `Alias.member = expr;` / `Alias.member[i] = expr;` /
+        // `Alias.member[i][j] = expr;` -- parsed as a MemberAssignStmt (the
         // grammar this shares with ordinary struct-field assignment, since
-        // both are `ident.ident = expr`). When `objectName` matches this
-        // Gather's alias and `member` is one of its exported symbols, this
-        // is actually an assignment to the gathered var, not a struct
-        // field -- rewrite the whole statement in place into a plain
-        // AssignStmt targeting the mangled name, which is exactly how the
-        // corresponding read-side rewrite (MemberAccess -> VarExpr, see
-        // rewriteGatheredRefsInExpr) already represents a gathered var.
-        // Anything else (a real struct-field assignment, or a
-        // MemberAssign belonging to some other Gather/alias) is left
-        // untouched.
+        // all are `ident.ident... = expr`). When `objectName` matches this
+        // Gather's alias and `member` is an exported symbol, this is really
+        // an assignment to the gathered var, not a struct field -- the whole
+        // statement is rewritten into the plain Assign / ArrayAssign form
+        // targeting the mangled name. Anything else (a real struct-field
+        // assignment, or a MemberAssign belonging to some other Gather) is
+        // left alone apart from rewriting what's inside it.
         auto s = static_cast<MemberAssignStmt*>(stmt.get());
-        if(s->objectName == alias && !s->index && exportedNames.count(s->member)) {
-            auto rewritten = std::make_shared<AssignStmt>();
-            rewritten->name = bundleName + "::" + s->member;
-            rewritten->value = s->value;
-            rewriteGatheredRefsInExpr(rewritten->value, alias, bundleName, exportedNames);
-            stmt = rewritten;
+        if(s->objectName == alias && exportedNames.count(s->member)) {
+            std::string mangled = bundleName + "::" + s->member;
+            E(s->value);
+            if(!s->index && s->indices.empty()) {
+                auto r = std::make_shared<AssignStmt>();
+                r->name = mangled; r->value = s->value;
+                stmt = r;
+            } else {
+                auto r = std::make_shared<ArrayAssignStmt>();
+                r->arrayName = mangled; r->value = s->value;
+                if(s->index) { E(s->index); r->index = s->index; }
+                for(auto& x : s->indices) { E(x); r->indices.push_back(x); }
+                stmt = r;
+            }
         } else {
-            rewriteGatheredRefsInExpr(s->value, alias, bundleName, exportedNames);
-            if(s->index) rewriteGatheredRefsInExpr(s->index, alias, bundleName, exportedNames);
+            // `origin.x = 5;` where `origin` is itself a gathered var.
+            if(s->objectName != alias) M(s->objectName);
+            E(s->index);
+            for(auto& x : s->indices) E(x);
+            E(s->value);
         }
         break;
     }
     case StmtKind::Print: {
         auto s = static_cast<PrintStmt*>(stmt.get());
-        rewriteGatheredRefsInExpr(s->expr, alias, bundleName, exportedNames);
+        E(s->expr);
+        if(!s->arrayName.empty()) M(s->arrayName);
         break;
     }
-    case StmtKind::ExprS: {
-        auto s = static_cast<ExprStmt*>(stmt.get());
-        rewriteGatheredRefsInExpr(s->expr, alias, bundleName, exportedNames);
-        break;
-    }
-    case StmtKind::Return: {
-        auto s = static_cast<ReturnStmt*>(stmt.get());
-        rewriteGatheredRefsInExpr(s->value, alias, bundleName, exportedNames);
-        break;
-    }
+    case StmtKind::ExprS:  E(static_cast<ExprStmt*>(stmt.get())->expr); break;
+    case StmtKind::Return: E(static_cast<ReturnStmt*>(stmt.get())->value); break;
     case StmtKind::If: {
         auto s = static_cast<IfStmt*>(stmt.get());
-        rewriteGatheredRefsInExpr(s->condition, alias, bundleName, exportedNames);
-        rewriteGatheredRefsInBlock(s->thenBlock, alias, bundleName, exportedNames);
-        rewriteGatheredRefsInBlock(s->elseBlock, alias, bundleName, exportedNames);
+        E(s->condition); B(s->thenBlock); B(s->elseBlock);
         break;
     }
     case StmtKind::While: {
         auto s = static_cast<WhileStmt*>(stmt.get());
-        rewriteGatheredRefsInExpr(s->condition, alias, bundleName, exportedNames);
-        rewriteGatheredRefsInBlock(s->body, alias, bundleName, exportedNames);
+        E(s->condition); B(s->body);
         break;
     }
     case StmtKind::For: {
         auto s = static_cast<ForStmt*>(stmt.get());
         rewriteGatheredRefsInStmt(s->init, alias, bundleName, exportedNames);
-        rewriteGatheredRefsInExpr(s->condition, alias, bundleName, exportedNames);
+        E(s->condition);
         rewriteGatheredRefsInStmt(s->increment, alias, bundleName, exportedNames);
-        rewriteGatheredRefsInBlock(s->body, alias, bundleName, exportedNames);
+        B(s->body);
         break;
     }
     case StmtKind::Block:
-        rewriteGatheredRefsInBlock(std::static_pointer_cast<BlockStmt>(stmt), alias, bundleName, exportedNames);
+        B(std::static_pointer_cast<BlockStmt>(stmt));
         break;
     case StmtKind::Gather: {
-        // A different Gather nested inside this one's body (gathering some
-        // *other* Bundle, generally): this outer rewrite pass (for `alias`/
-        // `bundleName`) still needs to reach references to *its own*
-        // alias anywhere inside the nested Gather's body too, since
-        // lexical scoping means the outer alias is still visible there
-        // (e.g. `Gather(... as Math) { Gather(... as Hi) { Math.square(4) } }`).
-        // The inner Gather's *own* alias/exports are handled independently,
-        // by resolveOneGatherStmt's separate rewrite call for that inner
-        // statement -- the two passes are independent and simply both need
-        // to walk into this same body.
-        auto g = static_cast<GatherStmt*>(stmt.get());
-        rewriteGatheredRefsInBlock(g->body, alias, bundleName, exportedNames);
+        // A different Gather nested inside this one's body: this outer
+        // rewrite pass (for `alias`/`bundleName`) still needs to reach
+        // references to *its own* alias anywhere inside the nested Gather's
+        // body too, since lexical scoping means the outer alias is still
+        // visible there. The inner Gather's *own* alias/exports are handled
+        // independently by resolveOneGatherStmt's separate rewrite call.
+        B(static_cast<GatherStmt*>(stmt.get())->body);
         break;
     }
     case StmtKind::Switch: {
         auto s = static_cast<SwitchStmt*>(stmt.get());
-        rewriteGatheredRefsInExpr(s->subject, alias, bundleName, exportedNames);
-        for(auto& c : s->cases) {
-            rewriteGatheredRefsInExpr(c.value, alias, bundleName, exportedNames);
-            rewriteGatheredRefsInBlock(c.body, alias, bundleName, exportedNames);
-        }
-        rewriteGatheredRefsInBlock(s->defaultBody, alias, bundleName, exportedNames);
+        E(s->subject);
+        for(auto& c : s->cases) { E(c.value); B(c.body); }
+        B(s->defaultBody);
         break;
     }
     case StmtKind::TryCatch: {
         auto s = static_cast<TryCatchStmt*>(stmt.get());
-        rewriteGatheredRefsInBlock(s->tryBlock, alias, bundleName, exportedNames);
-        rewriteGatheredRefsInBlock(s->catchBlock, alias, bundleName, exportedNames);
+        B(s->tryBlock); B(s->catchBlock);
         break;
     }
     case StmtKind::Parallel: {
         auto s = static_cast<ParallelStmt*>(stmt.get());
-        for(auto& block : s->blocks) rewriteGatheredRefsInBlock(block, alias, bundleName, exportedNames);
+        for(auto& block : s->blocks) B(block);
         break;
     }
     case StmtKind::Nodes: {
         auto s = std::static_pointer_cast<NodesStmt>(stmt);
-        for(auto& node : s->nodes) rewriteGatheredRefsInBlock(node.body, alias, bundleName, exportedNames);
+        for(auto& node : s->nodes) B(node.body);
+        break;
+    }
+    case StmtKind::RouteDecl: {
+        auto s = static_cast<RouteDeclStmt*>(stmt.get());
+        E(s->pathExpr); B(s->body);
+        break;
+    }
+    case StmtKind::ChunkDecl: {
+        auto s = static_cast<ChunkDecl*>(stmt.get());
+        E(s->countExpr); B(s->kernelBody);
         break;
     }
     default:
-        // Every remaining statement kind (VarDecl handled above, Assign/
-        // MemberAssign handled above, Print/ExprS/Return handled above,
-        // Break, Continue, RouteDecl, ServerStart, ...) cannot lexically
-        // contain a nested statement block, so there's nothing further to
-        // walk into.
+        // Break, Continue, ServerStart, Bundle: nothing inside to rewrite.
         break;
     }
 }
@@ -7657,7 +10138,23 @@ void resolveOneGatherStmt(GatherStmt* g, Program& program, const std::string& fr
     // function table under their mangled names -- ordinary flat
     // lookup (callCallable) then just finds them like any other
     // function, no interpreter-side namespacing needed.
+    // Function names of THIS file, snapshotted before the merge below.
+    std::vector<std::string> ownFnNames;
+    for(auto& kv : program.functions) if(kv.first.find("::") == std::string::npos) ownFnNames.push_back(kv.first);
+
     for(auto& kv : mod->exportedFunctions) program.functions[kv.first] = kv.second;
+
+    // `Gather(Bundle X){}` with an EMPTY body gathers X for the WHOLE file:
+    // top-level statements, every function body and struct constructor can
+    // use X's symbols (bare, or as `Alias.sym`). A non-empty body keeps the
+    // original lexical rule (visible only inside that block).
+    bool fileScope = !g->body || g->body->statements.empty();
+    if(fileScope) {
+        for(auto& st : program.statements) rewriteGatheredRefsInStmt(st, g->alias, g->bundleName, exportedNames);
+        for(auto& fn : ownFnNames) rewriteGatheredRefsInBlock(program.functions.at(fn).body, g->alias, g->bundleName, exportedNames);
+        for(auto& kv : program.structs) rewriteGatheredRefsInBlock(kv.second.ctorBody, g->alias, g->bundleName, exportedNames);
+        return;
+    }
 
     rewriteGatheredRefsInBlock(g->body, g->alias, g->bundleName, exportedNames);
 }
@@ -7748,6 +10245,7 @@ void findAndResolveGathersInStmt(const StmtPtr& stmt, Program& program, const st
     }
 }
 
+void resolveImplicitBundles(Program& program, const std::string& fromFile);
 void resolveGatherStatements(Program& program, const std::string& fromFile) {
     for(auto& stmt : program.statements) findAndResolveGathersInStmt(stmt, program, fromFile);
     // Snapshot function names before iterating: resolving a Gather nested
@@ -7761,12 +10259,96 @@ void resolveGatherStatements(Program& program, const std::string& fromFile) {
         auto& fn = program.functions.at(name);
         if(fn.body) for(auto& inner : fn.body->statements) findAndResolveGathersInStmt(inner, program, fromFile);
     }
+    resolveImplicitBundles(program, fromFile);
+}
+
+// Direct access: `Counter.sym` / `Counter.fn(x)` used anywhere in a file
+// WITHOUT an enclosing Gather. Every referenced Bundle is loaded like a
+// Gather would, its exported functions are merged under "<Bundle>::fn", and
+// every qualified reference in the file (top-level statements, function
+// bodies, struct constructors) is rewritten to the mangled name. Only
+// qualified references are touched (g_gatherQualifiedOnly): a local named
+// like an exported symbol is never hijacked, which is why the bare form
+// (`hits`) still needs a real Gather.
+void resolveImplicitBundles(Program& program, const std::string& fromFile) {
+    for(auto& name : program.implicitBundles) {
+        if(program.bundles.count(name)) continue;
+        auto mod = loadBundleModule(name, fromFile);
+        program.implicitBundlePaths[name] = mod->sourcePath;
+        const BundleDecl& bundle = mod->program.bundles.at(name);
+        std::unordered_set<std::string> exportedNames(bundle.exportedSymbols.begin(), bundle.exportedSymbols.end());
+
+        std::vector<std::string> fnNames;
+        for(auto& kv : program.functions) if(kv.first.find("::") == std::string::npos) fnNames.push_back(kv.first);
+        for(auto& kv : mod->exportedFunctions) program.functions[kv.first] = kv.second;
+
+        g_gatherQualifiedOnly = true;
+        try {
+            for(auto& st : program.statements) rewriteGatheredRefsInStmt(st, name, name, exportedNames);
+            for(auto& fn : fnNames) rewriteGatheredRefsInBlock(program.functions.at(fn).body, name, name, exportedNames);
+            for(auto& kv : program.structs) rewriteGatheredRefsInBlock(kv.second.ctorBody, name, name, exportedNames);
+        } catch(...) { g_gatherQualifiedOnly = false; throw; }
+        g_gatherQualifiedOnly = false;
+    }
+}
+
+// Puts every directly-accessed Bundle's exported vars into `in`'s global
+// scope under their mangled names (same snapshot semantics a Gather body
+// gets; Shard(Bundle.var) still makes one live).
+void seedImplicitBundleVars(Interpreter& in, const Program& program) {
+    for(auto& kv : program.implicitBundlePaths) {
+        auto mod = loadBundleModule(kv.first, kv.second);
+        computeBundleModuleVars(*mod, kv.first);
+        for(auto& gv : mod->exportedVars) in.scopes.front()[gv.mangledName] = gv.value;
+    }
+}
+
+// Registers the ENTRY file as a live module for every Bundle it declares, so
+// a file the entry Gathers can Gather the entry back (A Gathers B, B Gathers
+// A) and reach the entry's real variables -- `Shard(n) Alias;` exports in
+// particular -- instead of a second, separately-run copy of the entry file.
+// The module's interpreter is attached in runProgram() once it exists.
+void registerEntryModule(Program& program, const std::string& fromFile) {
+    if(program.bundles.empty()) return;
+    auto mod = std::make_shared<BundleModule>();
+    mod->sourcePath = fromFile;
+    mod->isEntry = true;
+    mod->varsComputed = true; // never re-run the entry's top level as a module
+    mod->program.bundles = program.bundles;
+    mod->program.functions = program.functions;
+    mod->program.structs = program.structs;
+    for(auto& kv : program.bundles) {
+        const std::string& bn = kv.first;
+        for(auto& sym : kv.second.exportedSymbols) {
+            auto fIt = mod->program.functions.find(sym);
+            if(fIt != mod->program.functions.end()) {
+                mod->exportedFunctions[bn + "::" + sym] = fIt->second;
+                GatheredCallable gc; gc.mod = mod; gc.bundleName = bn; gc.symbol = sym; gc.isStruct = false;
+                g_gatheredCallables[bn + "::" + sym] = gc;
+                continue;
+            }
+            auto sIt = mod->program.structs.find(sym);
+            if(sIt != mod->program.structs.end()) {
+                mod->exportedStructs[bn + "::" + sym] = sIt->second;
+                GatheredCallable gc; gc.mod = mod; gc.bundleName = bn; gc.symbol = sym; gc.isStruct = true;
+                g_gatheredCallables[bn + "::" + sym] = gc;
+            }
+        }
+        g_bundleModulesByName[bn] = mod;
+        g_knownBundleNames.insert(bn);
+    }
+    g_entryModule = mod;
+    g_entryCanonPath = canonPath(fromFile);
 }
 
 void runProgram(Program& program, const std::string& fromFile)
 {
+    registerEntryModule(program, fromFile);
     resolveGatherStatements(program, fromFile);
     Interpreter interpreter(program.functions, program.structs, program.datas);
+    // Non-owning: the interpreter lives on this stack frame for the whole run.
+    if(g_entryModule) g_entryModule->interp = std::shared_ptr<Interpreter>(&interpreter, [](Interpreter*){});
+    seedImplicitBundleVars(interpreter, program);
     Value discardedReturn;
     for(auto& stmt : program.statements) interpreter.execute(stmt, discardedReturn);
 }
@@ -7777,12 +10359,12 @@ int main(int argc,char** argv)
     if(argc!=2) { std::cout << "Usage:\n" << "    CnR program.CnR\n"; return 1; }
     try {
         std::string source = loadFile(argv[1]);
+        scanDirectoryForBundleNames(argv[1]); // before parsing: direct `Bundle.sym` access needs the names
         Lexer lexer(source);
         auto tokens = lexer.tokenize();
         Parser parser(tokens);
         auto program = parser.parseProgram();
         for(auto& kv : program.bundles) g_knownBundleNames.insert(kv.first);
-        scanDirectoryForBundleNames(argv[1]);
         runProgram(program, argv[1]);
     }
     catch(const std::exception& e) {

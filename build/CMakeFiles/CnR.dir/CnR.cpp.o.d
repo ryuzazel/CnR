@@ -213,14 +213,49 @@ CMakeFiles/CnR.dir/CnR.cpp.o: /home/ryu/Reaprendizado/008/CnR.cpp \
  /usr/include/c++/16/bits/std_mutex.h \
  /usr/include/c++/16/bits/unique_lock.h /usr/include/c++/16/complex \
  /usr/include/c++/16/unordered_set \
- /usr/include/c++/16/bits/unordered_set.h /usr/include/dirent.h \
+ /usr/include/c++/16/bits/unordered_set.h /usr/include/c++/16/iomanip \
+ /usr/include/c++/16/locale \
+ /usr/include/c++/16/bits/locale_facets_nonio.h \
+ /usr/include/c++/16/x86_64-pc-linux-gnu/bits/time_members.h \
+ /usr/include/c++/16/x86_64-pc-linux-gnu/bits/messages_members.h \
+ /usr/include/libintl.h /usr/include/c++/16/bits/locale_facets_nonio.tcc \
+ /usr/include/c++/16/bits/locale_conv.h \
+ /usr/include/c++/16/bits/quoted_string.h /usr/include/sys/stat.h \
+ /usr/include/bits/stat.h /usr/include/bits/struct_stat.h \
+ /usr/include/bits/statx.h /usr/include/linux/stat.h \
+ /usr/include/bits/statx-generic.h \
+ /usr/include/bits/types/struct_statx_timestamp.h \
+ /usr/include/bits/types/struct_statx.h /usr/include/dirent.h \
  /usr/include/bits/dirent.h /usr/include/bits/posix1_lim.h \
  /usr/include/bits/local_lim.h /usr/include/linux/limits.h \
- /usr/include/bits/dirent_ext.h /usr/include/unistd.h \
- /usr/include/bits/posix_opt.h /usr/include/bits/environments.h \
- /usr/include/bits/confname.h /usr/include/bits/getopt_posix.h \
- /usr/include/bits/getopt_core.h /usr/include/bits/unistd_ext.h \
- /usr/include/linux/close_range.h \
+ /usr/include/bits/dirent_ext.h /usr/include/c++/16/climits \
+ /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/limits.h \
+ /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/syslimits.h \
+ /usr/include/limits.h /usr/include/bits/posix2_lim.h \
+ /usr/include/bits/xopen_lim.h /usr/include/bits/uio_lim.h \
+ /usr/include/unistd.h /usr/include/bits/posix_opt.h \
+ /usr/include/bits/environments.h /usr/include/bits/confname.h \
+ /usr/include/bits/getopt_posix.h /usr/include/bits/getopt_core.h \
+ /usr/include/bits/unistd_ext.h /usr/include/linux/close_range.h \
+ /usr/include/dlfcn.h /usr/include/bits/dlfcn.h \
+ /usr/include/bits/dl_find_object.h /usr/include/sys/wait.h \
+ /usr/include/signal.h /usr/include/bits/signum-generic.h \
+ /usr/include/bits/signum-arch.h /usr/include/bits/types/sig_atomic_t.h \
+ /usr/include/bits/types/siginfo_t.h /usr/include/bits/types/__sigval_t.h \
+ /usr/include/bits/siginfo-arch.h /usr/include/bits/siginfo-consts.h \
+ /usr/include/bits/siginfo-consts-arch.h \
+ /usr/include/bits/types/sigval_t.h /usr/include/bits/types/sigevent_t.h \
+ /usr/include/bits/sigevent-consts.h /usr/include/bits/sigaction.h \
+ /usr/include/bits/sigcontext.h /usr/include/bits/types/stack_t.h \
+ /usr/include/sys/ucontext.h /usr/include/bits/sigstack.h \
+ /usr/include/bits/sigstksz.h /usr/include/bits/ss_flags.h \
+ /usr/include/bits/types/struct_sigstack.h /usr/include/bits/sigthread.h \
+ /usr/include/bits/signal_ext.h /usr/include/bits/types/idtype_t.h \
+ /usr/include/fcntl.h /usr/include/bits/fcntl.h \
+ /usr/include/bits/fcntl-linux.h /usr/include/bits/types/struct_iovec.h \
+ /usr/include/bits/cloexec.h /usr/include/linux/falloc.h \
+ /usr/include/linux/openat2.h /usr/include/bits/openat2.h \
+ /usr/include/sys/prctl.h /usr/include/linux/prctl.h \
  /home/ryu/Reaprendizado/008/math_bridge.inc \
  /home/ryu/Reaprendizado/008/mathlib_flat/mathlib.h \
  /home/ryu/Reaprendizado/008/mathlib_flat/Expr.h /usr/include/c++/16/map \
@@ -251,28 +286,16 @@ CMakeFiles/CnR.dir/CnR.cpp.o: /home/ryu/Reaprendizado/008/CnR.cpp \
  /home/ryu/Reaprendizado/008/mathlib_flat/math.cpp \
  /home/ryu/Reaprendizado/008/mathlib_flat/factor.cpp \
  /usr/include/c++/16/thread /usr/include/c++/16/bits/std_thread.h \
- /usr/include/c++/16/bits/this_thread_sleep.h /usr/include/c++/16/future \
- /usr/include/c++/16/condition_variable \
+ /usr/include/c++/16/bits/this_thread_sleep.h /usr/include/c++/16/chrono \
+ /usr/include/c++/16/future /usr/include/c++/16/condition_variable \
  /usr/include/c++/16/bits/atomic_futex.h /usr/include/c++/16/atomic \
  /home/ryu/Reaprendizado/008/sck/sockets.h /usr/include/sys/socket.h \
- /usr/include/bits/types/struct_iovec.h /usr/include/bits/socket.h \
- /usr/include/bits/socket_type.h /usr/include/bits/sockaddr.h \
- /usr/include/asm/socket.h /usr/include/asm-generic/socket.h \
- /usr/include/asm/sockios.h /usr/include/asm-generic/sockios.h \
+ /usr/include/bits/socket.h /usr/include/bits/socket_type.h \
+ /usr/include/bits/sockaddr.h /usr/include/asm/socket.h \
+ /usr/include/asm-generic/socket.h /usr/include/asm/sockios.h \
+ /usr/include/asm-generic/sockios.h \
  /usr/include/bits/types/struct_osockaddr.h /usr/include/netdb.h \
  /usr/include/netinet/in.h /usr/include/bits/in.h \
- /usr/include/rpc/netdb.h /usr/include/bits/types/sigevent_t.h \
- /usr/include/bits/types/__sigval_t.h /usr/include/bits/netdb.h \
+ /usr/include/rpc/netdb.h /usr/include/bits/netdb.h \
  /usr/include/arpa/inet.h /usr/include/netinet/tcp.h \
- /usr/include/c++/16/csignal /usr/include/signal.h \
- /usr/include/bits/signum-generic.h /usr/include/bits/signum-arch.h \
- /usr/include/bits/types/sig_atomic_t.h \
- /usr/include/bits/types/siginfo_t.h /usr/include/bits/siginfo-arch.h \
- /usr/include/bits/siginfo-consts.h \
- /usr/include/bits/siginfo-consts-arch.h \
- /usr/include/bits/types/sigval_t.h /usr/include/bits/sigevent-consts.h \
- /usr/include/bits/sigaction.h /usr/include/bits/sigcontext.h \
- /usr/include/bits/types/stack_t.h /usr/include/sys/ucontext.h \
- /usr/include/bits/sigstack.h /usr/include/bits/sigstksz.h \
- /usr/include/bits/ss_flags.h /usr/include/bits/types/struct_sigstack.h \
- /usr/include/bits/sigthread.h /usr/include/bits/signal_ext.h
+ /usr/include/c++/16/csignal

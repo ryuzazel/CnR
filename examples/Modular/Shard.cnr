@@ -1,0 +1,42 @@
+Gather(Bundle Shop){}
+
+
+Struct Portfollio{
+    var BRL;
+    var USD;
+    var AED;
+    var EUR;
+    var CHF;
+    Portfollio(var b, var u, var a, var e,var c){
+        BRL = b;
+        USD = u;
+        AED = a;
+        EUR = e;
+        CHF = c;
+    }
+}
+Struct People{
+    var name;
+    var Broker;
+    People(var n, var b){
+        name = n;
+        Broker = b;
+    }
+}
+
+var[] People;
+
+People.push(People("Pedro", Portfollio(100, 100, 100, 100,100)));
+
+Bundle Users{
+    Shard(People) User;
+}
+
+try{
+Shop.Buy(100, "BRL", "CHF",0);
+Shop.Check(0);
+
+print(People[0].Broker.CHF + " CHF");
+} catch(var e){
+    print(e);
+}

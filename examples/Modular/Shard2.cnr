@@ -1,0 +1,44 @@
+Gather(Bundle Users){}
+var USD = 5/6;
+var EUR = 5/6;
+var AED = 1/6;
+var BRL = 1/6;
+var CHF = 1;
+
+function Buy(var price,var currency,var buyingcurrency,var n){
+    var id = 1;
+    var b = 0;
+    switch(currency){
+        case "CHF" {id *= 1  ;}
+        case "EUR" {id *= 5/6;}
+        case "USD" {id *= 5/6;}
+        case "AED" {id *= 1/6;}
+        case "BRL" {id *= 1/6;}
+        default {Throw("something went wrong");}
+
+    }
+        switch(buyingcurrency){
+        case "CHF" {id /= 1  ;Users.User[n].Broker.CHF=Users.User[n].Broker.CHF-price*id;}
+        case "EUR" {id /= 5/6;Users.User[n].Broker.EUR=Users.User[n].Broker.EUR-price*id;}
+        case "USD" {id /= 5/6;Users.User[n].Broker.USD=Users.User[n].Broker.USD-price*id;}
+        case "AED" {id /= 1/6;Users.User[n].Broker.AED=Users.User[n].Broker.AED-price*id;}
+        case "BRL" {id /= 1/6;Users.User[n].Broker.BRL=Users.User[n].Broker.BRL-price*id;}
+       default {Throw("something went wrong");}
+        
+   }
+
+
+}
+function Check(var n){
+   print( Users.User[n].Broker.CHF + " CHF");
+
+
+
+}
+
+
+
+Bundle Shop {
+    Buy();
+    Check();
+}

@@ -1,0 +1,60 @@
+// chunk_example.cnr
+// Exercises both Chunk forms (CnR_SPEC.md §3).
+// Run with: ./cnr chunk_example.cnr
+// First run will invoke nvcc automatically (needs nvcc on PATH); the
+// compiled kernel is cached under ./.cnr_cache/ by content hash, so
+// re-running with an unchanged kernel body skips nvcc entirely.
+
+print("=== Form 2: kernel block (same body, every work-item) ===");
+
+// Squares 0..9999 on the GPU: one CUDA thread per work-item, `index` is
+// that thread's global index.
+Chunk Squares(10000) {
+    return index * index;
+}
+
+var[] squareResults = Squares.joinAll();
+print(squareResults[0]);      // 0
+print(squareResults[1]);      // 1
+print(squareResults[9999]);   // 99980001
+
+
+print("=== Form 2 (array-map variant): Chunk over an existing array ===");
+
+var[] input = { 1, 2, 3, 4, 5, 6, 7, 8 };
+
+// len(input) as the count expression makes this map over `input`,
+// indexing it via input[index] inside the kernel body (spec §3.5).
+Chunk Doubled(len(input)) {
+    return input[index] * 2;
+}
+
+var[] doubledResults = Doubled.joinAll();
+print(doubledResults[0]);   // 2
+print(doubledResults[7]);   // 16
+
+
+print("=== Form 1: slot assignment (different function per slot) ===");
+
+function taskA() { return 10; }
+function taskB() { return 20; }
+function taskC() { return 30; }
+function taskD() { return 40; }
+
+var[] Work = Chunk(4);
+Work[0] = taskA;
+Work[1] = taskB;
+Work[2] = taskC;
+Work[3] = taskD;
+
+var[] workResults = Work.joinAll();
+print(workResults[0]);   // 10
+print(workResults[3]);   // 40
+
+// .join() on a single slot -- per spec §3.4 this triggers the exact same
+// full-launch sync as .joinAll() above (already done, so this is now a
+// cached read), just returning one index's result.
+var single = Work[2].join();
+print(single);   // 30
+
+print("=== Done ===");

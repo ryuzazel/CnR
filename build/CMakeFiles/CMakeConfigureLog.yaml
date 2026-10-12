@@ -21,27 +21,30 @@ events:
       - "uname"
     candidate_directories:
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/usr/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
       - "/usr/bin/core_perl/"
     searched_directories:
       - "/home/ryu/bin/uname"
+      - "/opt/cuda/bin/uname"
       - "/usr/local/bin/uname"
     found: "/usr/bin/uname"
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -53,7 +56,7 @@ events:
       - "/usr/share/cmake/Modules/CMakeDetermineSystem.cmake:218 (message)"
       - "CMakeLists.txt:2 (project)"
     message: |
-      The system is: Linux - 6.18.41-1-lts - x86_64
+      The system is: Linux - 6.18.55-1-lts - x86_64
   -
     kind: "find-v1"
     backtrace:
@@ -76,37 +79,41 @@ events:
       - "smake"
     candidate_directories:
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/usr/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
       - "/usr/bin/core_perl/"
     searched_directories:
       - "/home/ryu/bin/gmake"
+      - "/opt/cuda/bin/gmake"
       - "/usr/local/bin/gmake"
       - "/usr/bin/gmake"
       - "/bin/gmake"
       - "/usr/local/sbin/gmake"
-      - "/opt/cuda/bin/gmake"
+      - "/home/ryu/.local/share/flatpak/exports/bin/gmake"
       - "/usr/lib/jvm/default/bin/gmake"
       - "/usr/bin/site_perl/gmake"
       - "/usr/bin/vendor_perl/gmake"
       - "/usr/bin/core_perl/gmake"
       - "/home/ryu/bin/make"
+      - "/opt/cuda/bin/make"
       - "/usr/local/bin/make"
     found: "/usr/bin/make"
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -142,27 +149,30 @@ events:
       - "clang++"
     candidate_directories:
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/usr/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
       - "/usr/bin/core_perl/"
     searched_directories:
       - "/home/ryu/bin/c++"
+      - "/opt/cuda/bin/c++"
       - "/usr/local/bin/c++"
     found: "/usr/bin/c++"
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -196,11 +206,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -226,7 +237,7 @@ events:
       Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "a.out"
       
       The CXX compiler identification is GNU, found in:
-        /home/ryu/Reaprendizado/008/build/CMakeFiles/4.4.2/CompilerIdCXX/a.out
+        /home/ryu/Reaprendizado/008/build/CMakeFiles/4.4.4/CompilerIdCXX/a.out
       
   -
     kind: "find-v1"
@@ -250,10 +261,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -262,11 +274,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -294,10 +307,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -306,11 +320,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -338,10 +353,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -350,11 +366,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -382,10 +399,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -394,11 +412,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -426,10 +445,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -438,11 +458,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -470,10 +491,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -482,11 +504,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -514,10 +537,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -526,11 +550,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -558,10 +583,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -570,11 +596,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -602,10 +629,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -613,10 +641,11 @@ events:
     searched_directories:
       - "/usr/bin/dlltool"
       - "/home/ryu/bin/dlltool"
+      - "/opt/cuda/bin/dlltool"
       - "/usr/local/bin/dlltool"
       - "/bin/dlltool"
       - "/usr/local/sbin/dlltool"
-      - "/opt/cuda/bin/dlltool"
+      - "/home/ryu/.local/share/flatpak/exports/bin/dlltool"
       - "/usr/lib/jvm/default/bin/dlltool"
       - "/usr/bin/site_perl/dlltool"
       - "/usr/bin/vendor_perl/dlltool"
@@ -625,11 +654,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -657,10 +687,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -669,11 +700,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -701,10 +733,11 @@ events:
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
@@ -712,10 +745,11 @@ events:
     searched_directories:
       - "/usr/bin/tapi"
       - "/home/ryu/bin/tapi"
+      - "/opt/cuda/bin/tapi"
       - "/usr/local/bin/tapi"
       - "/bin/tapi"
       - "/usr/local/sbin/tapi"
-      - "/opt/cuda/bin/tapi"
+      - "/home/ryu/.local/share/flatpak/exports/bin/tapi"
       - "/usr/lib/jvm/default/bin/tapi"
       - "/usr/bin/site_perl/tapi"
       - "/usr/bin/vendor_perl/tapi"
@@ -724,11 +758,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -752,48 +787,52 @@ events:
       CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
       CMAKE_FIND_USE_INSTALL_PREFIX: true
     names:
-      - "gcc-ar-16.1"
+      - "gcc-ar-16.2"
       - "gcc-ar-16"
       - "gcc-ar16"
       - "gcc-ar"
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
       - "/usr/bin/core_perl/"
     searched_directories:
-      - "/usr/bin/gcc-ar-16.1"
-      - "/home/ryu/bin/gcc-ar-16.1"
-      - "/usr/local/bin/gcc-ar-16.1"
-      - "/bin/gcc-ar-16.1"
-      - "/usr/local/sbin/gcc-ar-16.1"
-      - "/opt/cuda/bin/gcc-ar-16.1"
-      - "/usr/lib/jvm/default/bin/gcc-ar-16.1"
-      - "/usr/bin/site_perl/gcc-ar-16.1"
-      - "/usr/bin/vendor_perl/gcc-ar-16.1"
-      - "/usr/bin/core_perl/gcc-ar-16.1"
+      - "/usr/bin/gcc-ar-16.2"
+      - "/home/ryu/bin/gcc-ar-16.2"
+      - "/opt/cuda/bin/gcc-ar-16.2"
+      - "/usr/local/bin/gcc-ar-16.2"
+      - "/bin/gcc-ar-16.2"
+      - "/usr/local/sbin/gcc-ar-16.2"
+      - "/home/ryu/.local/share/flatpak/exports/bin/gcc-ar-16.2"
+      - "/usr/lib/jvm/default/bin/gcc-ar-16.2"
+      - "/usr/bin/site_perl/gcc-ar-16.2"
+      - "/usr/bin/vendor_perl/gcc-ar-16.2"
+      - "/usr/bin/core_perl/gcc-ar-16.2"
       - "/usr/bin/gcc-ar-16"
       - "/home/ryu/bin/gcc-ar-16"
+      - "/opt/cuda/bin/gcc-ar-16"
       - "/usr/local/bin/gcc-ar-16"
       - "/bin/gcc-ar-16"
       - "/usr/local/sbin/gcc-ar-16"
-      - "/opt/cuda/bin/gcc-ar-16"
+      - "/home/ryu/.local/share/flatpak/exports/bin/gcc-ar-16"
       - "/usr/lib/jvm/default/bin/gcc-ar-16"
       - "/usr/bin/site_perl/gcc-ar-16"
       - "/usr/bin/vendor_perl/gcc-ar-16"
       - "/usr/bin/core_perl/gcc-ar-16"
       - "/usr/bin/gcc-ar16"
       - "/home/ryu/bin/gcc-ar16"
+      - "/opt/cuda/bin/gcc-ar16"
       - "/usr/local/bin/gcc-ar16"
       - "/bin/gcc-ar16"
       - "/usr/local/sbin/gcc-ar16"
-      - "/opt/cuda/bin/gcc-ar16"
+      - "/home/ryu/.local/share/flatpak/exports/bin/gcc-ar16"
       - "/usr/lib/jvm/default/bin/gcc-ar16"
       - "/usr/bin/site_perl/gcc-ar16"
       - "/usr/bin/vendor_perl/gcc-ar16"
@@ -802,11 +841,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -830,48 +870,52 @@ events:
       CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
       CMAKE_FIND_USE_INSTALL_PREFIX: true
     names:
-      - "gcc-ranlib-16.1"
+      - "gcc-ranlib-16.2"
       - "gcc-ranlib-16"
       - "gcc-ranlib16"
       - "gcc-ranlib"
     candidate_directories:
       - "/usr/bin/"
       - "/home/ryu/bin/"
+      - "/opt/cuda/bin/"
       - "/usr/local/bin/"
       - "/bin/"
       - "/usr/local/sbin/"
-      - "/opt/cuda/bin/"
+      - "/home/ryu/.local/share/flatpak/exports/bin/"
       - "/usr/lib/jvm/default/bin/"
       - "/usr/bin/site_perl/"
       - "/usr/bin/vendor_perl/"
       - "/usr/bin/core_perl/"
     searched_directories:
-      - "/usr/bin/gcc-ranlib-16.1"
-      - "/home/ryu/bin/gcc-ranlib-16.1"
-      - "/usr/local/bin/gcc-ranlib-16.1"
-      - "/bin/gcc-ranlib-16.1"
-      - "/usr/local/sbin/gcc-ranlib-16.1"
-      - "/opt/cuda/bin/gcc-ranlib-16.1"
-      - "/usr/lib/jvm/default/bin/gcc-ranlib-16.1"
-      - "/usr/bin/site_perl/gcc-ranlib-16.1"
-      - "/usr/bin/vendor_perl/gcc-ranlib-16.1"
-      - "/usr/bin/core_perl/gcc-ranlib-16.1"
+      - "/usr/bin/gcc-ranlib-16.2"
+      - "/home/ryu/bin/gcc-ranlib-16.2"
+      - "/opt/cuda/bin/gcc-ranlib-16.2"
+      - "/usr/local/bin/gcc-ranlib-16.2"
+      - "/bin/gcc-ranlib-16.2"
+      - "/usr/local/sbin/gcc-ranlib-16.2"
+      - "/home/ryu/.local/share/flatpak/exports/bin/gcc-ranlib-16.2"
+      - "/usr/lib/jvm/default/bin/gcc-ranlib-16.2"
+      - "/usr/bin/site_perl/gcc-ranlib-16.2"
+      - "/usr/bin/vendor_perl/gcc-ranlib-16.2"
+      - "/usr/bin/core_perl/gcc-ranlib-16.2"
       - "/usr/bin/gcc-ranlib-16"
       - "/home/ryu/bin/gcc-ranlib-16"
+      - "/opt/cuda/bin/gcc-ranlib-16"
       - "/usr/local/bin/gcc-ranlib-16"
       - "/bin/gcc-ranlib-16"
       - "/usr/local/sbin/gcc-ranlib-16"
-      - "/opt/cuda/bin/gcc-ranlib-16"
+      - "/home/ryu/.local/share/flatpak/exports/bin/gcc-ranlib-16"
       - "/usr/lib/jvm/default/bin/gcc-ranlib-16"
       - "/usr/bin/site_perl/gcc-ranlib-16"
       - "/usr/bin/vendor_perl/gcc-ranlib-16"
       - "/usr/bin/core_perl/gcc-ranlib-16"
       - "/usr/bin/gcc-ranlib16"
       - "/home/ryu/bin/gcc-ranlib16"
+      - "/opt/cuda/bin/gcc-ranlib16"
       - "/usr/local/bin/gcc-ranlib16"
       - "/bin/gcc-ranlib16"
       - "/usr/local/sbin/gcc-ranlib16"
-      - "/opt/cuda/bin/gcc-ranlib16"
+      - "/home/ryu/.local/share/flatpak/exports/bin/gcc-ranlib16"
       - "/usr/lib/jvm/default/bin/gcc-ranlib16"
       - "/usr/bin/site_perl/gcc-ranlib16"
       - "/usr/bin/vendor_perl/gcc-ranlib16"
@@ -880,11 +924,12 @@ events:
     search_context:
       ENV{PATH}:
         - "/home/ryu/bin"
+        - "/opt/cuda/bin"
         - "/usr/local/bin"
         - "/usr/bin"
         - "/bin"
         - "/usr/local/sbin"
-        - "/opt/cuda/bin"
+        - "/home/ryu/.local/share/flatpak/exports/bin"
         - "/usr/lib/jvm/default/bin"
         - "/usr/bin/site_perl"
         - "/usr/bin/vendor_perl"
@@ -899,8 +944,8 @@ events:
     checks:
       - "Detecting CXX compiler ABI info"
     directories:
-      source: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H9dnAd"
-      binary: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H9dnAd"
+      source: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H3vAHy"
+      binary: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H3vAHy"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -911,24 +956,24 @@ events:
       variable: "CMAKE_CXX_ABI_COMPILED"
       cached: false
       stdout: |
-        Change Dir: '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H9dnAd'
+        Change Dir: '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H3vAHy'
         
-        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile cmTC_ddfaa/fast
-        /usr/bin/make  -f CMakeFiles/cmTC_ddfaa.dir/build.make CMakeFiles/cmTC_ddfaa.dir/build
-        make[1]: Entering directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H9dnAd'
-        Building CXX object CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o
-        /usr/bin/c++   -v -o CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile cmTC_9e01a/fast
+        /usr/bin/make  -f CMakeFiles/cmTC_9e01a.dir/build.make CMakeFiles/cmTC_9e01a.dir/build
+        make[1]: Entering directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H3vAHy'
+        Building CXX object CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o
+        /usr/bin/c++   -v -o CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp
         Using built-in specs.
         COLLECT_GCC=/usr/bin/c++
         Target: x86_64-pc-linux-gnu
         Configured with: ../gcc/configure --enable-languages=ada,c,c++,d,fortran,go,lto,m2,objc,obj-c++,rust,cobol --enable-bootstrap --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/lib --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://gitlab.archlinux.org/archlinux/packaging/packages/gcc/-/issues --with-build-config=bootstrap-lto --with-gcc-major-version-only --with-linker-hash-style=gnu --with-system-zlib --enable-cet=auto --enable-checking=release --enable-clocale=gnu --enable-default-pie --enable-default-ssp --enable-gnu-indirect-function --enable-gnu-unique-object --enable-libstdcxx-backtrace --enable-link-serialization=1 --enable-linker-build-id --enable-lto --enable-multilib --enable-plugin --enable-shared --enable-threads=posix --disable-fixincludes --disable-libssp --disable-libstdcxx-pch --disable-werror
         Thread model: posix
         Supported LTO compression algorithms: zlib zstd
-        gcc version 16.1.1 20260728 (GCC) 
-        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_ddfaa.dir/'
-         /usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1plus -quiet -v -D_GNU_SOURCE /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpdir CMakeFiles/cmTC_ddfaa.dir/ -dumpbase CMakeCXXCompilerABI.cpp.cpp -dumpbase-ext .cpp -mtune=generic -march=x86-64 -version -o /tmp/ccxl1pL1.s
-        GNU C++20 (GCC) version 16.1.1 20260728 (x86_64-pc-linux-gnu)
-        	compiled by GNU C version 16.1.1 20260728, GMP version 6.3.0, MPFR version 4.2.2, MPC version 1.4.1, isl version isl-0.28-GMP
+        gcc version 16.2.1 20260810 (GCC) 
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_9e01a.dir/'
+         /usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1plus -quiet -v -D_GNU_SOURCE /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpdir CMakeFiles/cmTC_9e01a.dir/ -dumpbase CMakeCXXCompilerABI.cpp.cpp -dumpbase-ext .cpp -mtune=generic -march=x86-64 -version -o /tmp/ccndwMVl.s
+        GNU C++20 (GCC) version 16.2.1 20260810 (x86_64-pc-linux-gnu)
+        	compiled by GNU C version 16.2.1 20260810, GMP version 6.3.0, MPFR version 4.2.2, MPC version 1.4.1, isl version isl-0.28-GMP
         
         GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
         ignoring nonexistent directory "/usr/lib/gcc/x86_64-pc-linux-gnu/16/include-fixed"
@@ -942,15 +987,15 @@ events:
          /usr/local/include
          /usr/include
         End of search list.
-        Compiler executable checksum: 92a285fc5382abf8eb3acadb63c2d94b
-        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_ddfaa.dir/'
-         as -v --64 -o CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o /tmp/ccxl1pL1.s
+        Compiler executable checksum: 4e9ac8b201f4ca740be09d0c7a39f82f
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_9e01a.dir/'
+         as -v --64 -o CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o /tmp/ccndwMVl.s
         GNU assembler version 2.47 (x86_64-pc-linux-gnu) using BFD version (GNU Binutils) 2.47
         COMPILER_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/
         LIBRARY_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/:/lib/../lib/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../:/lib/:/usr/lib/
-        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.'
-        Linking CXX executable cmTC_ddfaa
-        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_ddfaa.dir/link.txt --verbose=1
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.'
+        Linking CXX executable cmTC_9e01a
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_9e01a.dir/link.txt --verbose=1
         Using built-in specs.
         COLLECT_GCC=/usr/bin/c++
         COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper
@@ -958,17 +1003,17 @@ events:
         Configured with: ../gcc/configure --enable-languages=ada,c,c++,d,fortran,go,lto,m2,objc,obj-c++,rust,cobol --enable-bootstrap --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/lib --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://gitlab.archlinux.org/archlinux/packaging/packages/gcc/-/issues --with-build-config=bootstrap-lto --with-gcc-major-version-only --with-linker-hash-style=gnu --with-system-zlib --enable-cet=auto --enable-checking=release --enable-clocale=gnu --enable-default-pie --enable-default-ssp --enable-gnu-indirect-function --enable-gnu-unique-object --enable-libstdcxx-backtrace --enable-link-serialization=1 --enable-linker-build-id --enable-lto --enable-multilib --enable-plugin --enable-shared --enable-threads=posix --disable-fixincludes --disable-libssp --disable-libstdcxx-pch --disable-werror
         Thread model: posix
         Supported LTO compression algorithms: zlib zstd
-        gcc version 16.1.1 20260728 (GCC) 
+        gcc version 16.2.1 20260810 (GCC) 
         COMPILER_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/
         LIBRARY_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/:/lib/../lib/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../:/lib/:/usr/lib/
-        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_ddfaa' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_ddfaa.'
-         /usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2 -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccFw13qU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_ddfaa /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o
-        collect2 version 16.1.1 20260728
-        /usr/bin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccFw13qU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_ddfaa /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_9e01a' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_9e01a.'
+         /usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2 -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccYOfI83.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_9e01a /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o
+        collect2 version 16.2.1 20260810
+        /usr/bin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccYOfI83.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_9e01a /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o
         GNU ld (GNU Binutils) 2.47
-        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_ddfaa' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_ddfaa.'
-        /usr/bin/c++  -v -Wl,-v CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_ddfaa
-        make[1]: Leaving directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H9dnAd'
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_9e01a' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_9e01a.'
+        /usr/bin/c++  -v -Wl,-v CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_9e01a
+        make[1]: Leaving directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H3vAHy'
         
       exitCode: 0
   -
@@ -1007,24 +1052,24 @@ events:
       Parsed CXX implicit link information:
         link line regex: [^( *|.*[/\\])(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
         linker tool regex: [^[ 	]*(->|"|[0-9]+>[ 	-]*Build:[ 	0-9]+ ms[ 	]*)?[ 	]*(([^"]*[/\\])?(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild))("|,| |$)]
-        ignore line: [Change Dir: '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H9dnAd']
+        ignore line: [Change Dir: '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H3vAHy']
         ignore line: []
-        ignore line: [Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile cmTC_ddfaa/fast]
-        ignore line: [/usr/bin/make  -f CMakeFiles/cmTC_ddfaa.dir/build.make CMakeFiles/cmTC_ddfaa.dir/build]
-        ignore line: [make[1]: Entering directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H9dnAd']
-        ignore line: [Building CXX object CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o]
-        ignore line: [/usr/bin/c++   -v -o CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile cmTC_9e01a/fast]
+        ignore line: [/usr/bin/make  -f CMakeFiles/cmTC_9e01a.dir/build.make CMakeFiles/cmTC_9e01a.dir/build]
+        ignore line: [make[1]: Entering directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-H3vAHy']
+        ignore line: [Building CXX object CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o]
+        ignore line: [/usr/bin/c++   -v -o CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp]
         ignore line: [Using built-in specs.]
         ignore line: [COLLECT_GCC=/usr/bin/c++]
         ignore line: [Target: x86_64-pc-linux-gnu]
         ignore line: [Configured with: ../gcc/configure --enable-languages=ada c c++ d fortran go lto m2 objc obj-c++ rust cobol --enable-bootstrap --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/lib --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://gitlab.archlinux.org/archlinux/packaging/packages/gcc/-/issues --with-build-config=bootstrap-lto --with-gcc-major-version-only --with-linker-hash-style=gnu --with-system-zlib --enable-cet=auto --enable-checking=release --enable-clocale=gnu --enable-default-pie --enable-default-ssp --enable-gnu-indirect-function --enable-gnu-unique-object --enable-libstdcxx-backtrace --enable-link-serialization=1 --enable-linker-build-id --enable-lto --enable-multilib --enable-plugin --enable-shared --enable-threads=posix --disable-fixincludes --disable-libssp --disable-libstdcxx-pch --disable-werror]
         ignore line: [Thread model: posix]
         ignore line: [Supported LTO compression algorithms: zlib zstd]
-        ignore line: [gcc version 16.1.1 20260728 (GCC) ]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_ddfaa.dir/']
-        ignore line: [ /usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1plus -quiet -v -D_GNU_SOURCE /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpdir CMakeFiles/cmTC_ddfaa.dir/ -dumpbase CMakeCXXCompilerABI.cpp.cpp -dumpbase-ext .cpp -mtune=generic -march=x86-64 -version -o /tmp/ccxl1pL1.s]
-        ignore line: [GNU C++20 (GCC) version 16.1.1 20260728 (x86_64-pc-linux-gnu)]
-        ignore line: [	compiled by GNU C version 16.1.1 20260728  GMP version 6.3.0  MPFR version 4.2.2  MPC version 1.4.1  isl version isl-0.28-GMP]
+        ignore line: [gcc version 16.2.1 20260810 (GCC) ]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_9e01a.dir/']
+        ignore line: [ /usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1plus -quiet -v -D_GNU_SOURCE /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpdir CMakeFiles/cmTC_9e01a.dir/ -dumpbase CMakeCXXCompilerABI.cpp.cpp -dumpbase-ext .cpp -mtune=generic -march=x86-64 -version -o /tmp/ccndwMVl.s]
+        ignore line: [GNU C++20 (GCC) version 16.2.1 20260810 (x86_64-pc-linux-gnu)]
+        ignore line: [	compiled by GNU C version 16.2.1 20260810  GMP version 6.3.0  MPFR version 4.2.2  MPC version 1.4.1  isl version isl-0.28-GMP]
         ignore line: []
         ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
         ignore line: [ignoring nonexistent directory "/usr/lib/gcc/x86_64-pc-linux-gnu/16/include-fixed"]
@@ -1038,15 +1083,15 @@ events:
         ignore line: [ /usr/local/include]
         ignore line: [ /usr/include]
         ignore line: [End of search list.]
-        ignore line: [Compiler executable checksum: 92a285fc5382abf8eb3acadb63c2d94b]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_ddfaa.dir/']
-        ignore line: [ as -v --64 -o CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o /tmp/ccxl1pL1.s]
+        ignore line: [Compiler executable checksum: 4e9ac8b201f4ca740be09d0c7a39f82f]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_9e01a.dir/']
+        ignore line: [ as -v --64 -o CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o /tmp/ccndwMVl.s]
         ignore line: [GNU assembler version 2.47 (x86_64-pc-linux-gnu) using BFD version (GNU Binutils) 2.47]
         ignore line: [COMPILER_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/]
         ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/:/lib/../lib/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../:/lib/:/usr/lib/]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.']
-        ignore line: [Linking CXX executable cmTC_ddfaa]
-        ignore line: [/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_ddfaa.dir/link.txt --verbose=1]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.']
+        ignore line: [Linking CXX executable cmTC_9e01a]
+        ignore line: [/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_9e01a.dir/link.txt --verbose=1]
         ignore line: [Using built-in specs.]
         ignore line: [COLLECT_GCC=/usr/bin/c++]
         ignore line: [COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper]
@@ -1054,16 +1099,16 @@ events:
         ignore line: [Configured with: ../gcc/configure --enable-languages=ada c c++ d fortran go lto m2 objc obj-c++ rust cobol --enable-bootstrap --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/lib --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://gitlab.archlinux.org/archlinux/packaging/packages/gcc/-/issues --with-build-config=bootstrap-lto --with-gcc-major-version-only --with-linker-hash-style=gnu --with-system-zlib --enable-cet=auto --enable-checking=release --enable-clocale=gnu --enable-default-pie --enable-default-ssp --enable-gnu-indirect-function --enable-gnu-unique-object --enable-libstdcxx-backtrace --enable-link-serialization=1 --enable-linker-build-id --enable-lto --enable-multilib --enable-plugin --enable-shared --enable-threads=posix --disable-fixincludes --disable-libssp --disable-libstdcxx-pch --disable-werror]
         ignore line: [Thread model: posix]
         ignore line: [Supported LTO compression algorithms: zlib zstd]
-        ignore line: [gcc version 16.1.1 20260728 (GCC) ]
+        ignore line: [gcc version 16.2.1 20260810 (GCC) ]
         ignore line: [COMPILER_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/]
         ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/:/lib/../lib/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../:/lib/:/usr/lib/]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_ddfaa' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_ddfaa.']
-        link line: [ /usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2 -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccFw13qU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_ddfaa /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_9e01a' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_9e01a.']
+        link line: [ /usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2 -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccYOfI83.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_9e01a /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2] ==> ignore
           arg [-plugin] ==> ignore
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so] ==> ignore
           arg [-plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper] ==> ignore
-          arg [-plugin-opt=-fresolution=/tmp/ccFw13qU.res] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/ccYOfI83.res] ==> ignore
           arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
           arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
           arg [-plugin-opt=-pass-through=-latomic_asneeded] ==> ignore
@@ -1079,7 +1124,7 @@ events:
           arg [/lib64/ld-linux-x86-64.so.2] ==> ignore
           arg [-pie] ==> ignore
           arg [-o] ==> ignore
-          arg [cmTC_ddfaa] ==> ignore
+          arg [cmTC_9e01a] ==> ignore
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o]
@@ -1091,7 +1136,7 @@ events:
           arg [-L/lib] ==> dir [/lib]
           arg [-L/usr/lib] ==> dir [/usr/lib]
           arg [-v] ==> ignore
-          arg [CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
+          arg [CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
           arg [-lstdc++] ==> lib [stdc++]
           arg [-lm] ==> lib [m]
           arg [-lgcc_s] ==> lib [gcc_s]
@@ -1102,10 +1147,10 @@ events:
           arg [-lgcc] ==> lib [gcc]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
-        ignore line: [collect2 version 16.1.1 20260728]
-        link line: [/usr/bin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccFw13qU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_ddfaa /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> linker [/usr/bin/ld]
-        link line: [/usr/bin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccFw13qU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_ddfaa /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> linker architecture flags [-m;elf]
-        ignore line: [/usr/bin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccFw13qU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_ddfaa /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_ddfaa.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
+        ignore line: [collect2 version 16.2.1 20260810]
+        link line: [/usr/bin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccYOfI83.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_9e01a /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> linker [/usr/bin/ld]
+        link line: [/usr/bin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccYOfI83.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_9e01a /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> linker architecture flags [-m;elf]
+        ignore line: [/usr/bin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccYOfI83.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_9e01a /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_9e01a.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
         linker tool for 'CXX': /usr/bin/ld -m;elf
         collapse obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o] ==> [/usr/lib/Scrt1.o]
         collapse obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o] ==> [/usr/lib/crti.o]
@@ -1143,8 +1188,8 @@ events:
     checks:
       - "Performing Test CNR_HAS_MARCH_NATIVE"
     directories:
-      source: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-yBkMD0"
-      binary: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-yBkMD0"
+      source: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-EmvQKo"
+      binary: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-EmvQKo"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -1154,17 +1199,17 @@ events:
       variable: "CNR_HAS_MARCH_NATIVE"
       cached: true
       stdout: |
-        Change Dir: '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-yBkMD0'
+        Change Dir: '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-EmvQKo'
         
-        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile cmTC_8ea8c/fast
-        /usr/bin/make  -f CMakeFiles/cmTC_8ea8c.dir/build.make CMakeFiles/cmTC_8ea8c.dir/build
-        make[1]: Entering directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-yBkMD0'
-        Building CXX object CMakeFiles/cmTC_8ea8c.dir/src.cxx.o
-        /usr/bin/c++ -DCNR_HAS_MARCH_NATIVE  -std=c++17   -march=native -o CMakeFiles/cmTC_8ea8c.dir/src.cxx.o -c /home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-yBkMD0/src.cxx
-        Linking CXX executable cmTC_8ea8c
-        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_8ea8c.dir/link.txt --verbose=1
-        /usr/bin/c++ CMakeFiles/cmTC_8ea8c.dir/src.cxx.o -o cmTC_8ea8c
-        make[1]: Leaving directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-yBkMD0'
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile cmTC_b81ad/fast
+        /usr/bin/make  -f CMakeFiles/cmTC_b81ad.dir/build.make CMakeFiles/cmTC_b81ad.dir/build
+        make[1]: Entering directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-EmvQKo'
+        Building CXX object CMakeFiles/cmTC_b81ad.dir/src.cxx.o
+        /usr/bin/c++ -DCNR_HAS_MARCH_NATIVE  -std=c++17   -march=native -o CMakeFiles/cmTC_b81ad.dir/src.cxx.o -c /home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-EmvQKo/src.cxx
+        Linking CXX executable cmTC_b81ad
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_b81ad.dir/link.txt --verbose=1
+        /usr/bin/c++ CMakeFiles/cmTC_b81ad.dir/src.cxx.o -o cmTC_b81ad
+        make[1]: Leaving directory '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-EmvQKo'
         
       exitCode: 0
   -
@@ -1178,8 +1223,8 @@ events:
     checks:
       - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
     directories:
-      source: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-SUeff0"
-      binary: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-SUeff0"
+      source: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-rqnMbT"
+      binary: "/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-rqnMbT"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -1189,18 +1234,18 @@ events:
       variable: "CMAKE_HAVE_LIBC_PTHREAD"
       cached: true
       stdout: |
-        Change Dir: '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-SUeff0'
+        Change Dir: '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-rqnMbT'
         
-        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile cmTC_a1a36/fast
-        /usr/bin/make  -f CMakeFiles/cmTC_a1a36.dir/build.make CMakeFiles/cmTC_a1a36.dir/build
-        make[1]: Entrando no diretório '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-SUeff0'
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile cmTC_8876a/fast
+        /usr/bin/make  -f CMakeFiles/cmTC_8876a.dir/build.make CMakeFiles/cmTC_8876a.dir/build
+        make[1]: Entrando no diretório '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-rqnMbT'
         
-        Building CXX object CMakeFiles/cmTC_a1a36.dir/src.cxx.o
-        /usr/bin/c++ -DCMAKE_HAVE_LIBC_PTHREAD  -std=c++17 -o CMakeFiles/cmTC_a1a36.dir/src.cxx.o -c /home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-SUeff0/src.cxx
-        Linking CXX executable cmTC_a1a36
-        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_a1a36.dir/link.txt --verbose=1
-        /usr/bin/c++ CMakeFiles/cmTC_a1a36.dir/src.cxx.o -o cmTC_a1a36
-        make[1]: Saindo do diretório '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-SUeff0'
+        Building CXX object CMakeFiles/cmTC_8876a.dir/src.cxx.o
+        /usr/bin/c++ -DCMAKE_HAVE_LIBC_PTHREAD  -std=c++17 -o CMakeFiles/cmTC_8876a.dir/src.cxx.o -c /home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-rqnMbT/src.cxx
+        Linking CXX executable cmTC_8876a
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_8876a.dir/link.txt --verbose=1
+        /usr/bin/c++ CMakeFiles/cmTC_8876a.dir/src.cxx.o -o cmTC_8876a
+        make[1]: Saindo do diretório '/home/ryu/Reaprendizado/008/build/CMakeFiles/CMakeScratch/TryCompile-rqnMbT'
         
         
       exitCode: 0
